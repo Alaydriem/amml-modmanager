@@ -8,10 +8,10 @@ on:
         required: true
         type: string
       amml_ref:
-        description: amml branch, tag or commit to build against
+        description: amml branch, tag or commit to build against; empty means the highest amml tag in this version's MAJOR.MINOR series
         required: false
         type: string
-        default: master
+        default: ""
 
 permissions:
   contents: write

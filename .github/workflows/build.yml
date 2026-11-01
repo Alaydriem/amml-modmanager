@@ -6,10 +6,7 @@ on:
   pull_request:
     branches: [master]
 
-# The workspace depends on ../amml by relative path, so this repo is checked out into a subfolder and the
-# public sibling repos next to it.
 env:
-  AMML_REPO: alaydriem/amml
   MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}/modmanager-amml
 
 defaults:
@@ -23,11 +20,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: modmanager-amml
-
-      - uses: actions/checkout@v7
-        with:
-          repository: ${{ env.AMML_REPO }}
-          path: amml
 
       - uses: jdx/mise-action@v2
         with:

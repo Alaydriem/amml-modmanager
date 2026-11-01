@@ -97,7 +97,7 @@ description = "Compiles each crate's i18n/<locale>.po into i18n/packs/<locale>.j
 dir = "{{config_root}}"
 shell = "bash -c"
 run = [
-  'for dir in crates/*/i18n; do [ -d "$dir" ] || continue; cargo run -q --manifest-path ../amml/i18n/tool/Cargo.toml -- build "$dir" "$dir/packs" || exit 1; done',
+  'for dir in crates/*/i18n; do [ -d "$dir" ] || continue; bash scripts/amml-i18n-tool.sh build "$dir" "$dir/packs" || exit 1; done',
 ]
 
 [tasks."i18n:pseudo"]
@@ -105,7 +105,7 @@ description = "Writes the en_XA pseudo-locale pack of each crate's .pot into i18
 dir = "{{config_root}}"
 shell = "bash -c"
 run = [
-  'for pot in crates/*/i18n/*.pot; do [ -f "$pot" ] || continue; cargo run -q --manifest-path ../amml/i18n/tool/Cargo.toml -- pseudo "$pot" "$(dirname "$pot")/packs/en_XA.json" || exit 1; done',
+  'for pot in crates/*/i18n/*.pot; do [ -f "$pot" ] || continue; bash scripts/amml-i18n-tool.sh pseudo "$pot" "$(dirname "$pot")/packs/en_XA.json" || exit 1; done',
 ]
 
 [tasks."i18n:report"]
@@ -113,8 +113,10 @@ description = "Prints the translation coverage of each crate's locales against i
 dir = "{{config_root}}"
 shell = "bash -c"
 run = [
-  'for pot in crates/*/i18n/*.pot; do [ -f "$pot" ] || continue; echo "## $pot"; cargo run -q --manifest-path ../amml/i18n/tool/Cargo.toml -- report "$pot" "$(dirname "$pot")" || exit 1; done',
+  'for pot in crates/*/i18n/*.pot; do [ -f "$pot" ] || continue; echo "## $pot"; bash scripts/amml-i18n-tool.sh report "$pot" "$(dirname "$pot")" || exit 1; done',
 ]
 
 [tools]
 "cargo:cbindgen" = "0.29.2"
+# scripts/amml-i18n-tool.sh reads cargo metadata with it
+jq = "1.8.1"
