@@ -32,7 +32,7 @@ A mod manager for [AMML](https://github.com/alaydriem/amml) client mods on Minec
 
 | Manager | Minecraft Bedrock | AMML loader |
 | --- | --- | --- |
-| 0.1.0 | 1.26.51, 1.26.60 | 0.1.0 or later |
+| 26.60.0 | 1.26.51, 1.26.60 | 26.60.0 or later |
 
 ## Usage
 
