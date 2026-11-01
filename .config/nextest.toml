@@ -1,0 +1,6 @@
+# The snapshot tests each open a wgpu device. About one full run in four, a snapshot test passes ("test result:
+# ok") and then its process aborts with 0xc0000409 while the GPU driver shuts down at exit. Running fewer at a time
+# did not stop it, so the snapshot tests get a retry; nextest reports such a test as FLAKY, not as passed.
+[[profile.default.overrides]]
+filter = 'test(/^snapshot::/)'
+retries = 2

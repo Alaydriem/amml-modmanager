@@ -1,0 +1,120 @@
+[tasks.preflight]
+description = "Names a missing Rust toolchain, cargo-nextest or cbindgen before a build turns it into an obscure error"
+dir = "{{config_root}}"
+run = [
+  "rustc --version",
+  "cargo --version",
+  "cargo nextest --version",
+  "cbindgen --version",
+]
+
+[tasks.check]
+description = "cargo check, clippy with warnings denied (workspace, and amm-client without egui), and rustfmt check of the workspace members"
+dir = "{{config_root}}"
+# fmt names each member: --all would also format the amml path dependencies
+run = [
+  "cargo check --workspace --all-targets",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo check -p amm-client --no-default-features --features test-support",
+  "cargo clippy -p amm-client --no-default-features --features test-support -- -D warnings",
+  "cargo fmt --check -p amm-core -p amm-abi -p amm-store -p amm-ui -p amm-client -p amm-ffi -p amm-overlay -p amm-amml -p amm-bench -p amm-e2e",
+]
+
+[tasks.test]
+description = "Every workspace test through cargo-nextest"
+dir = "{{config_root}}"
+run = "cargo nextest run --workspace --no-tests=pass"
+
+[tasks.header]
+description = "Regenerates include/alaydriem_mod_manager.h from amm-abi"
+dir = "{{config_root}}"
+run = [
+  "cbindgen --config crates/amm-abi/cbindgen.toml --crate amm-abi --output include/alaydriem_mod_manager.h crates/amm-abi",
+]
+
+[tasks.header-check]
+description = "Fails when include/alaydriem_mod_manager.h is out of date with amm-abi"
+dir = "{{config_root}}"
+run = [
+  "cbindgen --verify --config crates/amm-abi/cbindgen.toml --crate amm-abi --output include/alaydriem_mod_manager.h crates/amm-abi",
+]
+
+[tasks.build-mod]
+description = "Builds the AMML mod into dist/@amml/modmanager (amml_modmanager.dll, its PDB and amml.hcl)"
+dir = "{{config_root}}"
+shell = "bash -c"
+# cargo names the cdylib amml_modmanager.dll, the module name mods find the manager by
+run = '''
+set -e
+cargo build --release -p amm-amml
+rm -rf dist/@amml/modmanager
+mkdir -p dist/@amml/modmanager
+cp target/release/amml_modmanager.dll dist/@amml/modmanager/amml_modmanager.dll
+cp target/release/amml_modmanager.pdb dist/@amml/modmanager/amml_modmanager.pdb
+cp crates/amm-amml/packaging/amml.hcl dist/@amml/modmanager/amml.hcl
+echo "built dist/@amml/modmanager"
+'''
+
+[tasks.e2e]
+description = "End-to-end scenarios in amm-e2e"
+dir = "{{config_root}}"
+run = "cargo nextest run -p amm-e2e --no-tests=pass"
+
+[tasks.bench]
+description = "Criterion benches in amm-bench; arguments narrow the run"
+dir = "{{config_root}}"
+run = "cargo bench -p amm-bench --"
+
+[tasks.panel-shots]
+description = "Writes the manager panel screenshots into docs/findings/amm-ui"
+dir = "{{config_root}}"
+run = "cargo run --release -p amm-ui --example panel_shots -- docs/findings/amm-ui"
+
+[tasks."panel-shots:pseudo"]
+description = "Writes the manager panel screenshots in the en_XA pseudo-locale into docs/findings/amm-ui/en_XA"
+dir = "{{config_root}}"
+run = "cargo run --release -p amm-ui --example panel_shots -- docs/findings/amm-ui/en_XA --locale en_XA"
+
+# Translation catalogs: each crate that shows text has crates/<crate>/i18n/ holding <domain>.pot
+# (written from its Message enum), the translators' <locale>.po files, and packs/<locale>.json.
+
+[tasks."i18n:extract"]
+description = "Writes each crate's i18n/<domain>.pot from its Message enum"
+dir = "{{config_root}}"
+run = [
+  "cargo run -q -p amm-ui --example amm_i18n_extract",
+]
+
+[tasks."i18n:check"]
+description = "Fails when a crate's .pot is out of date with its Message enum"
+dir = "{{config_root}}"
+run = [
+  "cargo run -q -p amm-ui --example amm_i18n_extract -- --check",
+]
+
+[tasks."i18n:build"]
+description = "Compiles each crate's i18n/<locale>.po into i18n/packs/<locale>.json; a locale under 90 % coverage is not shipped"
+dir = "{{config_root}}"
+shell = "bash -c"
+run = [
+  'for dir in crates/*/i18n; do [ -d "$dir" ] || continue; cargo run -q --manifest-path ../amml/i18n/tool/Cargo.toml -- build "$dir" "$dir/packs" || exit 1; done',
+]
+
+[tasks."i18n:pseudo"]
+description = "Writes the en_XA pseudo-locale pack of each crate's .pot into i18n/packs/en_XA.json"
+dir = "{{config_root}}"
+shell = "bash -c"
+run = [
+  'for pot in crates/*/i18n/*.pot; do [ -f "$pot" ] || continue; cargo run -q --manifest-path ../amml/i18n/tool/Cargo.toml -- pseudo "$pot" "$(dirname "$pot")/packs/en_XA.json" || exit 1; done',
+]
+
+[tasks."i18n:report"]
+description = "Prints the translation coverage of each crate's locales against its .pot"
+dir = "{{config_root}}"
+shell = "bash -c"
+run = [
+  'for pot in crates/*/i18n/*.pot; do [ -f "$pot" ] || continue; echo "## $pot"; cargo run -q --manifest-path ../amml/i18n/tool/Cargo.toml -- report "$pot" "$(dirname "$pot")" || exit 1; done',
+]
+
+[tools]
+"cargo:cbindgen" = "0.29.2"

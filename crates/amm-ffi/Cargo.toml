@@ -1,0 +1,37 @@
+[package]
+name = "amm-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+autotests = false
+
+[lib]
+crate-type = ["rlib"]
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+amm-core = { workspace = true, features = ["egui"] }
+amm-abi.workspace = true
+amm-store.workspace = true
+amm-ui.workspace = true
+amml-ui.workspace = true
+arc-swap.workspace = true
+curia.workspace = true
+chrono.workspace = true
+hcl-rs.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+png.workspace = true

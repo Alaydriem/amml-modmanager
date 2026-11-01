@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/amm-core",
+  "crates/amm-abi",
+  "crates/amm-store",
+  "crates/amm-ui",
+  "crates/amm-client",
+  "crates/amm-ffi",
+  "crates/amm-overlay",
+  "crates/amm-amml",
+  "crates/amm-bench",
+  "crates/amm-e2e",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+authors = ["Charles R. Portwood II"]
+license = "BSD-3-Clause"
+publish = false
+
+[workspace.dependencies]
+egui = { version = "=0.37.0", default-features = false, features = ["default_fonts"] }
+eframe = { version = "=0.37.0", default-features = false, features = ["default_fonts", "glow"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+png = "0.18.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+hcl-rs = "=0.19.8"
+hcl-edit = "=0.9.7"
+curia = "=0.2.2"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
+time = "0.3.55"
+thiserror = "2.0.21"
+crossbeam-channel = "0.5.17"
+arc-swap = "1.7"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+tempfile = "3.27.0"
+criterion = "0.5"
+windows-sys = { version = "0.61.2", features = ["Win32_System_LibraryLoader"] }
+windows = "0.62.2"
+retour = "0.3.1"
+object = { version = "0.40.0", default-features = false, features = ["read_core", "pe"] }
+# The UI toolkit, from the amml repository next to this one
+amml-ui = { path = "../amml/ui/kit" }
+amml-i18n = { path = "../amml/i18n/runtime" }
+amml-i18n-tool = { path = "../amml/i18n/tool" }
+amml-ui-rules = { path = "../amml/ui/rules" }
+amm-core = { path = "crates/amm-core" }
+amm-abi = { path = "crates/amm-abi" }
+amm-store = { path = "crates/amm-store" }
+amm-ui = { path = "crates/amm-ui" }
+amm-client = { path = "crates/amm-client" }
+amm-ffi = { path = "crates/amm-ffi" }
+amm-overlay = { path = "crates/amm-overlay" }
+# The AMML mod SDK and the MSVC layouts, from the amml repository next to this one
+amml-abi = { path = "../amml/loader/abi" }
+amml-sdk = { path = "../amml/sdk/sdk" }
+amml-msvc = { path = "../amml/sdk/msvc" }
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

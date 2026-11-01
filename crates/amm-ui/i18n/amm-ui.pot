@@ -1,0 +1,376 @@
+# Messages of the amm-ui domain, written by amml-i18n-tool. Do not edit.
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"X-Domain: amm-ui\n"
+
+#. The studio name over the panel title; keep it as a name
+msgid "ALAYDRIEM"
+msgstr ""
+
+msgid "Mod Manager"
+msgstr ""
+
+#, python-brace-format
+msgid "{count} mod installed"
+msgid_plural "{count} mods installed"
+msgstr[0] ""
+msgstr[1] ""
+
+#, python-brace-format
+msgid "{count} enabled"
+msgid_plural "{count} enabled"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "Saving…"
+msgstr ""
+
+msgid "Saved"
+msgstr ""
+
+msgid "Save failed"
+msgstr ""
+
+msgid "INSTALLED MODS"
+msgstr ""
+
+msgid "MANAGER"
+msgstr ""
+
+msgid "Conflicts"
+msgstr ""
+
+msgid "Keybinds"
+msgstr ""
+
+msgid "Manager settings"
+msgstr ""
+
+#. Follows the key chord that opens the panel, in the sidebar footer
+msgid "opens and closes this panel"
+msgstr ""
+
+#. A mod's version, as in v1.2.0
+#, python-brace-format
+msgid "v{version}"
+msgstr ""
+
+msgid "Unknown mod"
+msgstr ""
+
+msgid "Open/close panel"
+msgstr ""
+
+#. A capability: a part of the game that one mod may own at a time
+msgid "Camera"
+msgstr ""
+
+#. A capability: a part of the game that one mod may own at a time
+msgid "Input"
+msgstr ""
+
+#. A capability: a part of the game that one mod may own at a time
+msgid "HUD"
+msgstr ""
+
+#. A capability: a part of the game that one mod may own at a time
+msgid "Overlay"
+msgstr ""
+
+#. A capability: a part of the game that one mod may own at a time
+msgid "World draw"
+msgstr ""
+
+#. A capability: a part of the game that one mod may own at a time
+msgid "Render size"
+msgstr ""
+
+msgid "Moves or replaces the game camera"
+msgstr ""
+
+msgid "Takes keyboard and mouse input"
+msgstr ""
+
+msgid "Owns what shows on the play screen"
+msgstr ""
+
+msgid "Draws interactive panels over the game"
+msgstr ""
+
+msgid "Draws markers and labels in the world"
+msgstr ""
+
+msgid "Makes the game draw at a set size, larger than its window"
+msgstr ""
+
+msgid "General"
+msgstr ""
+
+msgid "Capabilities"
+msgstr ""
+
+#. {author} is the person or team that made the mod
+#, python-brace-format
+msgid "by {author}"
+msgstr ""
+
+msgid "Enabled"
+msgstr ""
+
+msgid "Disabled"
+msgstr ""
+
+#, python-brace-format
+msgid "{count} conflict"
+msgid_plural "{count} conflicts"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "No settings"
+msgstr ""
+
+msgid "This mod has only keybinds. Change them on the Keybinds tab."
+msgstr ""
+
+msgid "Applies after world reload"
+msgstr ""
+
+msgid "Applies after restart"
+msgstr ""
+
+#. An on/off setting's value, inside "Changed in game to {value}"
+msgid "on"
+msgstr ""
+
+#. An on/off setting's value, inside "Changed in game to {value}"
+msgid "off"
+msgstr ""
+
+#. Under a number field when the typed value is outside the setting's range
+#, python-brace-format
+msgid "Use a number from {min} to {max}"
+msgstr ""
+
+msgid "Click a keybind, then press its new chord. Esc cancels."
+msgstr ""
+
+#, python-brace-format
+msgid "{count} key conflict"
+msgid_plural "{count} key conflicts"
+msgstr[0] ""
+msgstr[1] ""
+
+#. Follows the key chord in the conflict banner; {name} is the other mod
+#, python-brace-format
+msgid "is also bound by {name}."
+msgstr ""
+
+msgid "Every keybind of every installed mod, and the panel toggle"
+msgstr ""
+
+msgid "Click a keybind, then press its new chord. Esc cancels. Changes save on their own."
+msgstr ""
+
+msgid "ACTION"
+msgstr ""
+
+msgid "KEY CHORD"
+msgstr ""
+
+msgid "CAPABILITY"
+msgstr ""
+
+msgid "SCOPE"
+msgstr ""
+
+msgid "CLAIM"
+msgstr ""
+
+msgid "LEASE"
+msgstr ""
+
+msgid "Global"
+msgstr ""
+
+msgid "While held"
+msgstr ""
+
+#. A table cell for a keybind that needs no capability
+msgid "—"
+msgstr ""
+
+#, python-brace-format
+msgid "What {mod} declares it may use. An exclusive claim goes to one mod at a time."
+msgstr ""
+
+msgid "Not declared"
+msgstr ""
+
+msgid "Exclusive"
+msgstr ""
+
+msgid "Shared"
+msgstr ""
+
+msgid "Held"
+msgstr ""
+
+#, python-brace-format
+msgid "Suspended by {name}"
+msgstr ""
+
+#, python-brace-format
+msgid "Blocked by {name}"
+msgstr ""
+
+msgid "Idle"
+msgstr ""
+
+#, python-brace-format
+msgid "Found from the capability and keybind declarations of {count} installed mod"
+msgid_plural "Found from the capability and keybind declarations of {count} installed mods"
+msgstr[0] ""
+msgstr[1] ""
+
+msgid "CONFLICTS"
+msgstr ""
+
+msgid "INTERACTIONS"
+msgstr ""
+
+msgid "No conflicts. The declarations of the installed mods do not clash."
+msgstr ""
+
+msgid "More key clashes exist than the panel lists. Rebind keys to see the rest."
+msgstr ""
+
+msgid "No interactions between the installed mods."
+msgstr ""
+
+msgid "Resolved"
+msgstr ""
+
+msgid "Needs review"
+msgstr ""
+
+#. Before the chips of the two mods in a clash card on the Conflicts page
+msgctxt "clash card"
+msgid "Mods"
+msgstr ""
+
+msgid "RESOLUTION"
+msgstr ""
+
+msgid "Deny the second request"
+msgstr ""
+
+#, python-brace-format
+msgid "Prefer {name}"
+msgstr ""
+
+#, python-brace-format
+msgid "Suspend {name}"
+msgstr ""
+
+msgid "Coexist"
+msgstr ""
+
+msgid "Rebind one of the keys"
+msgstr ""
+
+msgid "Open keybinds"
+msgstr ""
+
+msgid "Suspension"
+msgstr ""
+
+msgid "Keybind"
+msgstr ""
+
+#. A clash title; {capability} is a capability name, {first} and {second} mods
+#, python-brace-format
+msgid "{capability}: {first} and {second}"
+msgstr ""
+
+#. A clash title; {chord} is a key chord such as Ctrl+B
+#, python-brace-format
+msgid "{chord} is bound twice"
+msgstr ""
+
+#, python-brace-format
+msgid "Both mods claim {capability} as exclusive. Only one of them can hold it at a time."
+msgstr ""
+
+#. {first_action} and {second_action} are keybind names; the others are mods
+#, python-brace-format
+msgid "{first_action} in {first} and {second_action} in {second} use the same chord. Both can be live at the same time."
+msgstr ""
+
+#. Stands in for a keybind name that is not known
+msgid "a keybind"
+msgstr ""
+
+#, python-brace-format
+msgid "{holder} claims {capability} as exclusive. While it holds {capability}, {other} stops its shared use and its {capability} keys are blocked."
+msgstr ""
+
+msgid "Stored in the manager's config.hcl"
+msgstr ""
+
+msgid "PANEL"
+msgstr ""
+
+msgid "Panel toggle"
+msgstr ""
+
+msgid "Opens and closes this panel from anywhere in the game"
+msgstr ""
+
+msgid "LANGUAGE"
+msgstr ""
+
+msgid "Language"
+msgstr ""
+
+msgid "Every mod shows its text in this language"
+msgstr ""
+
+msgid "English"
+msgstr ""
+
+#. A toast title; {holder} is the mod that holds the capability
+#, python-brace-format
+msgid "{capability} is held by {holder}"
+msgstr ""
+
+#, python-brace-format
+msgid "{mod}: the request was denied."
+msgstr ""
+
+#. {action} is the name of the keybind that did not run
+#, python-brace-format
+msgid "{mod}: the {action} key was blocked."
+msgstr ""
+
+#, python-brace-format
+msgid "{mod}: a key was blocked."
+msgstr ""
+
+#, python-brace-format
+msgid "{mod} stopped drawing"
+msgstr ""
+
+msgid "It failed too many frames in a row."
+msgstr ""
+
+msgid "Save failed, try again"
+msgstr ""
+
+msgid "Change the rule in the panel under Conflicts"
+msgstr ""
+
+msgid "Turn it off and on in the panel to try again"
+msgstr ""

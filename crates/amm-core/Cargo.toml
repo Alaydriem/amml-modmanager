@@ -1,0 +1,35 @@
+[package]
+name = "amm-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+autotests = false
+
+[features]
+egui = ["dep:egui"]
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+amml-abi.workspace = true
+serde.workspace = true
+hcl-rs.workspace = true
+hcl-edit.workspace = true
+thiserror.workspace = true
+curia.workspace = true
+bytemuck.workspace = true
+png.workspace = true
+arc-swap.workspace = true
+egui = { workspace = true, optional = true }
+
+[dev-dependencies]
+amm-core = { path = ".", features = ["egui"] }
+egui.workspace = true

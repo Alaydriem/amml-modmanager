@@ -1,0 +1,41 @@
+[package]
+name = "amm-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+autotests = false
+
+[features]
+default = ["egui"]
+egui = ["dep:egui", "dep:amml-ui", "dep:amml-i18n", "dep:crossbeam-channel", "amm-core/egui"]
+test-support = []
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+amm-abi.workspace = true
+amm-core.workspace = true
+amml-ui = { workspace = true, optional = true }
+amml-i18n = { workspace = true, optional = true }
+egui = { workspace = true, optional = true }
+crossbeam-channel = { workspace = true, optional = true }
+curia.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hcl-rs.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory"] }
+
+[dev-dependencies]
+amm-client = { path = ".", features = ["test-support"] }
+chrono.workspace = true
+tracing.workspace = true
+tempfile.workspace = true

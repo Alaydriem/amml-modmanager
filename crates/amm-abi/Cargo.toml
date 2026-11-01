@@ -1,0 +1,20 @@
+[package]
+name = "amm-abi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+amm-core.workspace = true
+bytemuck.workspace = true

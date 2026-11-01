@@ -1,0 +1,65 @@
+[package]
+name = "amm-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "zero_alloc"
+path = "tests/zero_alloc.rs"
+
+[[bench]]
+name = "capture_buffer"
+path = "benches/capture_buffer.rs"
+harness = false
+
+[[bench]]
+name = "client_frame"
+path = "benches/client_frame.rs"
+harness = false
+
+[[bench]]
+name = "icon"
+path = "benches/icon.rs"
+harness = false
+
+[[bench]]
+name = "manager"
+path = "benches/manager.rs"
+harness = false
+
+[[bench]]
+name = "present_additions"
+path = "benches/present_additions.rs"
+harness = false
+
+[[bench]]
+name = "route_during_compose"
+path = "benches/route_during_compose.rs"
+harness = false
+
+[lints]
+workspace = true
+
+[dependencies]
+amm-abi.workspace = true
+amm-core = { workspace = true, features = ["egui"] }
+amm-ffi.workspace = true
+amm-client.workspace = true
+amm-ui.workspace = true
+amml-ui.workspace = true
+png.workspace = true
+egui.workspace = true
+tempfile.workspace = true
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+criterion.workspace = true

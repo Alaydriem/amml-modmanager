@@ -1,0 +1,10 @@
+mod capabilities_tab;
+mod conflicts_view;
+mod general_tab;
+mod header;
+mod keybinds_tab;
+mod manager_settings;
+mod mod_list;
+mod pseudo_fit;
+mod toasts;
+mod value_text;

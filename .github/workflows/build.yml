@@ -1,0 +1,56 @@
+name: Build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# The workspace depends on ../amml by relative path, so this repo is checked out into a subfolder and the
+# public sibling repos next to it.
+env:
+  AMML_REPO: alaydriem/amml
+  MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}/modmanager-amml
+
+defaults:
+  run:
+    working-directory: modmanager-amml
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: modmanager-amml
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.AMML_REPO }}
+          path: amml
+
+      - uses: jdx/mise-action@v2
+        with:
+          working_directory: modmanager-amml
+
+      - uses: taiki-e/install-action@nextest
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            modmanager-amml/target
+          key: cargo-${{ hashFiles('modmanager-amml/Cargo.lock', 'modmanager-amml/rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-
+
+      - run: mise run check
+      - run: mise run test
+      - run: mise run header-check
+      - run: mise run build-mod
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: amml-modmanager-${{ github.sha }}-windows-x64
+          path: modmanager-amml/dist/@amml/modmanager/

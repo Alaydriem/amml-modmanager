@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, semver from the Minecraft version (26.60.5)
+        required: true
+        type: string
+      amml_ref:
+        description: amml branch, tag or commit to build against
+        required: false
+        type: string
+        default: master
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: alaydriem/amml/.github/workflows/release-mod.yml@master
+    with:
+      version: ${{ inputs.version }}
+      amml_ref: ${{ inputs.amml_ref }}
+      path: modmanager-amml
+      namespace: amml
+      name: modmanager
+      package_task: build-mod
+      modmanager: false
+      extra_task: header-check
