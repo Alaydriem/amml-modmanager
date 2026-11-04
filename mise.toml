@@ -52,6 +52,7 @@ mkdir -p dist/@amml/modmanager
 cp target/release/amml_modmanager.dll dist/@amml/modmanager/amml_modmanager.dll
 cp target/release/amml_modmanager.pdb dist/@amml/modmanager/amml_modmanager.pdb
 cp crates/amm-amml/packaging/amml.hcl dist/@amml/modmanager/amml.hcl
+cp crates/amm-amml/packaging/icon.png dist/@amml/modmanager/icon.png
 echo "built dist/@amml/modmanager"
 '''
 

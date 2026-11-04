@@ -4,15 +4,15 @@
 
 # Alaydriem's Mod Manager
 
-[![Release](https://img.shields.io/github/v/release/alaydriem/modmanager?include_prereleases)](https://github.com/alaydriem/modmanager/releases)
-[![Build](https://img.shields.io/github/actions/workflow/status/alaydriem/modmanager/build.yml?branch=master&label=build)](https://github.com/alaydriem/modmanager/actions/workflows/build.yml)
-[![License](https://img.shields.io/github/license/alaydriem/modmanager)](./LICENSE)
+[![Release](https://img.shields.io/github/v/release/alaydriem/amml-modmanager?include_prereleases)](https://github.com/alaydriem/amml-modmanager/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/alaydriem/amml-modmanager/build.yml?branch=master&label=build)](https://github.com/alaydriem/amml-modmanager/actions/workflows/build.yml)
+[![License](https://img.shields.io/github/license/alaydriem/amml-modmanager)](./LICENSE)
 ![Minecraft Bedrock](https://img.shields.io/badge/Minecraft_Bedrock-1.26.51%2C%201.26.60-62B47A)
 [![AMML](https://img.shields.io/badge/AMML-mod-4A90D9)](https://github.com/alaydriem/amml)
 
 </div>
 
-A mod manager for [AMML](https://github.com/alaydriem/amml) client mods on Minecraft Bedrock (Windows) that providers a shared interface for setting keybinds, managing compatability, and enabling and disabling mods
+A mod manager for [AMML](https://github.com/alaydriem/amml) client mods on Minecraft Bedrock (Windows) that provides a shared interface for setting keybinds, managing compatibility, and enabling and disabling mods
 
 <table>
   <tr>
@@ -27,12 +27,7 @@ A mod manager for [AMML](https://github.com/alaydriem/amml) client mods on Minec
 
 ## Installation
 
-- Install [AMML](https://github.com/alaydriem/amml) first
-- Install the DLL from the latest release to mods/amml/modmanager
-
-| Manager | Minecraft Bedrock | AMML loader |
-| --- | --- | --- |
-| 26.60.0 | 1.26.51, 1.26.60 | 26.60.0 or later |
+The [AMML launcher](https://github.com/alaydriem/amml/releases/latest) installs the manager into every instance.
 
 ## Usage
 

@@ -19,6 +19,7 @@ permissions:
 jobs:
   release:
     uses: alaydriem/amml/.github/workflows/release-mod.yml@master
+    secrets: inherit
     with:
       version: ${{ inputs.version }}
       amml_ref: ${{ inputs.amml_ref }}
@@ -28,3 +29,4 @@ jobs:
       package_task: package
       modmanager: false
       extra_task: header-check
+      registry: true
