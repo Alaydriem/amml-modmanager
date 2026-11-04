@@ -40,7 +40,7 @@ jobs:
       - run: mise run check
       - run: mise run test
       - run: mise run header-check
-      - run: mise run build-mod
+      - run: mise run package
 
       - uses: actions/upload-artifact@v7
         with:

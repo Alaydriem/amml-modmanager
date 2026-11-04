@@ -50,12 +50,12 @@ one, the panel shows the first letter of the mod name.
 
 ## Building
 
-Requires Windows x64, [mise](https://mise.jdx.dev), rustup and [cargo-nextest](https://nexte.st). The manager is a Rust AMML mod: `mise run build-mod` writes `dist/@amml/modmanager/` (the DLL, its PDB and `amml.hcl`). It builds against the AMML SDK from the `amml` git tag named in `Cargo.toml`; cargo fetches it.
+Requires Windows x64, [mise](https://mise.jdx.dev), rustup and [cargo-nextest](https://nexte.st). The manager is a Rust AMML mod: `mise run package` writes `dist/@amml/modmanager/` (the DLL, its PDB and `amml.hcl`). `mise run install [--instance <name>]` runs `package`, then copies it into `%LOCALAPPDATA%\amml\instances\<name>\mods\amml\@amml\modmanager\` (default instance `1.26.60.05`; close the game first). It builds against the AMML SDK from the `amml` git tag named in `Cargo.toml`; cargo fetches it.
 
 ```powershell
 mise trust
 mise run preflight
-mise run build-mod
+mise run package
 mise run test
 ```
 

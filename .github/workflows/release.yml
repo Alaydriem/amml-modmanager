@@ -25,6 +25,6 @@ jobs:
       path: modmanager-amml
       namespace: amml
       name: modmanager
-      package_task: build-mod
+      package_task: package
       modmanager: false
       extra_task: header-check

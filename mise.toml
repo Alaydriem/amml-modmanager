@@ -1,5 +1,5 @@
 [tasks.preflight]
-description = "Names a missing Rust toolchain, cargo-nextest or cbindgen before a build turns it into an obscure error"
+description = "Names a missing toolchain or tool before a build turns it into an obscure error; also checks cbindgen"
 dir = "{{config_root}}"
 run = [
   "rustc --version",
@@ -9,7 +9,7 @@ run = [
 ]
 
 [tasks.check]
-description = "cargo check, clippy with warnings denied (workspace, and amm-client without egui), and rustfmt check of the workspace members"
+description = "Compiles, runs clippy with warnings denied and checks formatting; also checks amm-client without egui and formats only the workspace members"
 dir = "{{config_root}}"
 # fmt names each member: --all would also format the amml path dependencies
 run = [
@@ -21,7 +21,7 @@ run = [
 ]
 
 [tasks.test]
-description = "Every workspace test through cargo-nextest"
+description = "Every test through cargo nextest run"
 dir = "{{config_root}}"
 run = "cargo nextest run --workspace --no-tests=pass"
 
@@ -39,8 +39,8 @@ run = [
   "cbindgen --verify --config crates/amm-abi/cbindgen.toml --crate amm-abi --output include/alaydriem_mod_manager.h crates/amm-abi",
 ]
 
-[tasks.build-mod]
-description = "Builds the AMML mod into dist/@amml/modmanager (amml_modmanager.dll, its PDB and amml.hcl)"
+[tasks.package]
+description = "Builds dist/@amml/modmanager/ (amml_modmanager.dll, amml_modmanager.pdb, amml.hcl), the release artifact"
 dir = "{{config_root}}"
 shell = "bash -c"
 # cargo names the cdylib amml_modmanager.dll, the module name mods find the manager by
@@ -120,3 +120,22 @@ run = [
 "cargo:cbindgen" = "0.29.2"
 # scripts/amml-i18n-tool.sh reads cargo metadata with it
 jq = "1.8.1"
+
+[tasks.install]
+description = "Runs package, then copies dist/@amml/modmanager into mods/amml/@amml/modmanager of an AMML instance under %LOCALAPPDATA%/amml/instances (--instance, default 1.26.60.05). The mod's config/ stays. Close the game first: a running game locks the DLL"
+depends = ["package"]
+dir = "{{config_root}}"
+shell = "bash -c"
+usage = '''
+flag "--instance <name>" default="1.26.60.05" help="The instance folder under %LOCALAPPDATA%/amml/instances"
+'''
+run = '''
+set -e
+[ -n "$LOCALAPPDATA" ] || { echo "LOCALAPPDATA is not set; the instances live under %LOCALAPPDATA%/amml/instances"; exit 1; }
+instance="$LOCALAPPDATA/amml/instances/${usage_instance:-1.26.60.05}"
+[ -f "$instance/Minecraft.Windows.exe" ] || { echo "no instance at $instance"; exit 1; }
+target="$instance/mods/amml/@amml/modmanager"
+mkdir -p "$target"
+cp -r dist/@amml/modmanager/. "$target/"
+echo "installed dist/@amml/modmanager -> $target"
+'''
