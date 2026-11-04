@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "amm-abi"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-core",
  "bytemuck",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "amm-amml"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-abi",
  "amm-client",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "amm-bench"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-abi",
  "amm-client",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "amm-client"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-abi",
  "amm-client",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "amm-core"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-core",
  "amml-abi",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "amm-e2e"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-abi",
  "amm-client",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "amm-ffi"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-abi",
  "amm-core",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "amm-overlay"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-abi",
  "amm-ffi",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "amm-store"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-core",
  "chrono",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "amm-ui"
-version = "26.60.5"
+version = "26.60.6"
 dependencies = [
  "amm-core",
  "amml-i18n",
