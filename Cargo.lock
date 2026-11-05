@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "amm-abi"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-core",
  "bytemuck",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "amm-amml"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-abi",
  "amm-client",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "amm-bench"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-abi",
  "amm-client",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "amm-client"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-abi",
  "amm-client",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "amm-core"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-core",
  "amml-abi",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "amm-e2e"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-abi",
  "amm-client",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "amm-ffi"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-abi",
  "amm-core",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "amm-overlay"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-abi",
  "amm-ffi",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "amm-store"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-core",
  "chrono",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "amm-ui"
-version = "26.60.6"
+version = "26.62.0"
 dependencies = [
  "amm-core",
  "amml-i18n",
@@ -201,13 +201,13 @@ dependencies = [
 
 [[package]]
 name = "amml-abi"
-version = "26.60.5"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.60.5#88e58bcb3673d84d4c14eb493c2a8ac2460787de"
+version = "26.62.0"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.62.0#1b4e270b311d13f2099094ae5073e5673a1dcff4"
 
 [[package]]
 name = "amml-i18n"
-version = "26.60.5"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.60.5#88e58bcb3673d84d4c14eb493c2a8ac2460787de"
+version = "26.62.0"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.62.0#1b4e270b311d13f2099094ae5073e5673a1dcff4"
 dependencies = [
  "curia",
  "icu_locale_core",
@@ -220,8 +220,8 @@ dependencies = [
 
 [[package]]
 name = "amml-i18n-tool"
-version = "26.60.5"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.60.5#88e58bcb3673d84d4c14eb493c2a8ac2460787de"
+version = "26.62.0"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.62.0#1b4e270b311d13f2099094ae5073e5673a1dcff4"
 dependencies = [
  "amml-i18n",
  "icu_locale_core",
@@ -233,16 +233,16 @@ dependencies = [
 
 [[package]]
 name = "amml-msvc"
-version = "26.60.5"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.60.5#88e58bcb3673d84d4c14eb493c2a8ac2460787de"
+version = "26.62.0"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.62.0#1b4e270b311d13f2099094ae5073e5673a1dcff4"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "amml-sdk"
-version = "26.60.5"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.60.5#88e58bcb3673d84d4c14eb493c2a8ac2460787de"
+version = "26.62.0"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.62.0#1b4e270b311d13f2099094ae5073e5673a1dcff4"
 dependencies = [
  "amml-abi",
  "thiserror 2.0.21",
@@ -250,8 +250,8 @@ dependencies = [
 
 [[package]]
 name = "amml-ui"
-version = "26.60.5"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.60.5#88e58bcb3673d84d4c14eb493c2a8ac2460787de"
+version = "26.62.0"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.62.0#1b4e270b311d13f2099094ae5073e5673a1dcff4"
 dependencies = [
  "amml-i18n",
  "curia",
@@ -260,8 +260,8 @@ dependencies = [
 
 [[package]]
 name = "amml-ui-rules"
-version = "26.60.5"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.60.5#88e58bcb3673d84d4c14eb493c2a8ac2460787de"
+version = "26.62.0"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.62.0#1b4e270b311d13f2099094ae5073e5673a1dcff4"
 
 [[package]]
 name = "android-activity"
