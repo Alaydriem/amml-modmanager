@@ -2,6 +2,7 @@ namespace   = "amml"
 name        = "modmanager"
 entry       = "amml_modmanager.dll"
 api_version = 2
+amml_version = "26.60.6"
 entries = [
   # required: the manager refuses to enable without them
   "ClientInstance.update",
