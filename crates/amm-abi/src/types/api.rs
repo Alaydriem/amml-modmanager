@@ -280,8 +280,8 @@ pub struct AmmApi {
     /// (`AMM_POINTER_OP_WHEEL`) is the wheel, with `value` the signed number of notches to turn (positive away from the player), at
     /// most 32 either way. Since 2.3, `op` 5 (`AMM_POINTER_OP_TURN_YAW`) and 6 (`AMM_POINTER_OP_TURN_PITCH`) turn the
     /// player's look by `value` millidegrees on that axis, at most 360000 either way: the manager adds the turns of
-    /// one axis into one pending value and, once per game tick, makes one call of the game's own turn with the sum
-    /// in degrees, past its own block of the player's mouse turn, when the game has a local player. The sign of each
+    /// one axis into one pending value and, once per client update (a frame), makes one call of the game's own turn
+    /// with the sum in degrees, held to 360000 either way, past its own block of the player's mouse turn, when the game has a local player. The sign of each
     /// axis is the game's own. Any other `op`, a button `value`
     /// other than 0 or 1, a wheel `value` past 32 either way or a turn `value` past 360000 either way is
     /// `InvalidArgument`; a wheel or turn `value` of 0 is `Ok` and sends nothing. A manager of minor 2.2 or older

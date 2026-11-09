@@ -257,11 +257,36 @@ fn turns_that_cancel_out_queue_nothing() {
 }
 
 #[test]
-fn a_pending_turn_saturates_instead_of_wrapping() {
+fn a_pending_turn_is_held_to_one_full_turn_either_way() {
+    let limit = FakePointer::MAX_TURN_MILLIDEGREES;
     let mut pointer = FakePointer::new();
 
-    pointer.turn(TurnAxis::Yaw, i32::MAX);
-    pointer.turn(TurnAxis::Yaw, 1000);
+    pointer.turn(TurnAxis::Yaw, 300_000);
+    pointer.turn(TurnAxis::Yaw, 300_000);
+    assert_eq!(ops(&mut pointer), vec![PointerOp::Turn { axis: TurnAxis::Yaw, millidegrees: limit }]);
 
-    assert_eq!(ops(&mut pointer), vec![PointerOp::Turn { axis: TurnAxis::Yaw, millidegrees: i32::MAX }]);
+    pointer.turn(TurnAxis::Yaw, -300_000);
+    pointer.turn(TurnAxis::Yaw, -300_000);
+    assert_eq!(ops(&mut pointer), vec![PointerOp::Turn { axis: TurnAxis::Yaw, millidegrees: -limit }]);
+
+    pointer.turn(TurnAxis::Pitch, i32::MAX);
+    pointer.turn(TurnAxis::Pitch, 1000);
+    assert_eq!(ops(&mut pointer), vec![PointerOp::Turn { axis: TurnAxis::Pitch, millidegrees: limit }]);
+}
+
+#[test]
+fn a_turn_past_the_bound_on_one_axis_leaves_the_other_axis_alone() {
+    let mut pointer = FakePointer::new();
+
+    pointer.turn(TurnAxis::Pitch, 1234);
+    pointer.turn(TurnAxis::Yaw, 300_000);
+    pointer.turn(TurnAxis::Yaw, 300_000);
+
+    assert_eq!(
+        ops(&mut pointer),
+        vec![
+            PointerOp::Turn { axis: TurnAxis::Pitch, millidegrees: 1234 },
+            PointerOp::Turn { axis: TurnAxis::Yaw, millidegrees: FakePointer::MAX_TURN_MILLIDEGREES },
+        ]
+    );
 }

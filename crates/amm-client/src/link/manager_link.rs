@@ -318,12 +318,15 @@ impl ManagerLink {
         }
     }
 
-    /// Holds a game mouse button down, lets it go, or turns the wheel by `steps` notches (positive away from the
-    /// player). The rules of `send_key` apply: the mod must hold the `Input` lease, `NotPermitted` otherwise, and
-    /// while the panel is open or another mod holds `Input`. A wheel turn past 32 notches either way is
-    /// `InvalidArgument`. A manager queue full of button actions is `QueueFull`, and nothing changes. When the
-    /// manager lets go of a held button itself, the mod gets `ModEvent::FakeKeysReleased`. A manager older than ABI
-    /// 2.2 is `Unsupported`.
+    /// Holds a game mouse button down, lets it go, turns the wheel by `steps` notches (positive away from the
+    /// player), or turns the player's look on one axis (`PointerOp::Turn`, in millidegrees). The rules of `send_key`
+    /// apply: the mod must hold the `Input` lease, `NotPermitted` otherwise, and while the panel is open or another
+    /// mod holds `Input`. A wheel turn past 32 notches either way, or a look turn past 360000 millidegrees either
+    /// way, is `InvalidArgument`. The manager adds the look turns of one axis into one pending value, held to
+    /// 360000 either way, and applies it once per client update (a frame). A manager queue full of button actions
+    /// is `QueueFull`, and nothing changes. When the manager lets go of a held button itself, the mod gets
+    /// `ModEvent::FakeKeysReleased`. A manager older than ABI 2.2 is `Unsupported`. A manager of ABI 2.2 answers
+    /// `InvalidArgument` to the look turns; they need ABI 2.3.
     pub fn send_pointer(&self, op: PointerOp) -> Result<(), LinkError> {
         let Some(send_pointer) = self.table.api().send_pointer else {
             return Err(LinkError::from(AmmStatus::Unsupported));

@@ -20,7 +20,7 @@ use crate::structs::registry::{ModIndex, ModMask};
 pub struct FakePointer {
     held: [u8; ModMask::CAPACITY],
     ops: VecDeque<PointerOp>,
-    // pending look turn in millidegrees, saturating
+    // pending look turn in millidegrees, held within `MAX_TURN_MILLIDEGREES` either way
     pitch: i32,
     yaw: i32,
     dropped: u64,
@@ -81,13 +81,14 @@ impl FakePointer {
     }
 
     /// Adds `millidegrees` to the pending look turn of `axis`. It uses no queue room, so it never fails; the sum
-    /// saturates at the `i32` limits. The answer is always true.
+    /// is clamped to `MAX_TURN_MILLIDEGREES` either way, one full turn. The answer is always true.
     pub fn turn(&mut self, axis: TurnAxis, millidegrees: i32) -> bool {
         let pending = match axis {
             TurnAxis::Pitch => &mut self.pitch,
             TurnAxis::Yaw => &mut self.yaw,
         };
-        *pending = pending.saturating_add(millidegrees);
+        *pending =
+            pending.saturating_add(millidegrees).clamp(-Self::MAX_TURN_MILLIDEGREES, Self::MAX_TURN_MILLIDEGREES);
         true
     }
 
