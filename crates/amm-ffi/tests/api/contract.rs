@@ -131,16 +131,17 @@ fn table_size_equals_size_of_amm_api() {
 }
 
 #[test]
-fn abi_minor_is_1() {
-    assert_eq!(AMM_ABI_MINOR, 1);
-    assert_eq!(TestHost::api().abi_minor, 1);
+fn abi_minor_is_3() {
+    assert_eq!(AMM_ABI_MINOR, 3);
+    assert_eq!(TestHost::api().abi_minor, 3);
 }
 
 #[test]
 fn table_fills_watch_keys_and_send_key() {
     let api = TestHost::api();
 
-    assert!(api.watch_keys.is_some() && api.send_key.is_some());
+    assert!(api.watch_keys.is_some() && api.send_key.is_some() && api.send_pointer.is_some());
+    assert!(api.panel_open.is_some());
     assert_eq!(api.size as usize, size_of::<AmmApi>());
 }
 

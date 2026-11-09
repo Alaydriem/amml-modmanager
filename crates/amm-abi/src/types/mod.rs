@@ -15,6 +15,7 @@ pub mod frame_output;
 pub mod handle;
 pub mod log_level;
 pub mod mesh_view;
+pub mod pointer_op;
 pub mod render_size;
 pub mod render_size_state;
 pub mod sampler_kind;
@@ -43,6 +44,10 @@ pub use frame_output::AmmFrameOutput;
 pub use handle::AmmHandle;
 pub use log_level::AmmLogLevel;
 pub use mesh_view::AmmMeshView;
+pub use pointer_op::{
+    AMM_POINTER_OP_LEFT, AMM_POINTER_OP_MIDDLE, AMM_POINTER_OP_RIGHT, AMM_POINTER_OP_TURN_PITCH,
+    AMM_POINTER_OP_TURN_YAW, AMM_POINTER_OP_WHEEL,
+};
 pub use render_size::AmmRenderSize;
 pub use render_size_state::AmmRenderSizeState;
 pub use sampler_kind::AmmSamplerKind;

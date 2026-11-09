@@ -1,6 +1,6 @@
 use amm_abi::types::{AmmAcquireOutcome, AmmCapability, AmmCursorShape, AmmEventKind, AmmUiEventKind};
 use amm_core::structs::frame::FrameInputData;
-use amm_ffi::host::{amm_host_char, amm_host_pointer};
+use amm_ffi::host::{amm_host_char, amm_host_focus_lost, amm_host_pointer, amm_host_take_focus_loss_owed};
 use amm_ffi::types::AmmHostPointerKind;
 
 use crate::support::test_client::SeenEvent;
@@ -249,4 +249,54 @@ fn a_mod_with_no_field_and_no_input_lease_gets_no_navigation_keys() {
     host.frame(1);
 
     assert_eq!(quiet.input_flags() & FrameInputData::ALLOW_NAV_KEYS, 0);
+}
+
+#[test]
+fn focus_loss_is_swallowed_only_under_a_full_block_holder() {
+    let host = TestHost::new();
+    let headless = TestClient::register(
+        &host,
+        &Descriptors::with_claims(
+            "headless",
+            &[],
+            "claim \"Input\" {
+  mode = \"Exclusive\"
+  reason = \"r\"
+  full_block = true
+}
+",
+        ),
+        TestMesh::triangle(),
+    );
+
+    assert!(!amm_host_focus_lost());
+    assert_eq!(headless.acquire(AmmCapability::Input).outcome, AmmAcquireOutcome::Granted);
+    assert!(amm_host_focus_lost());
+}
+
+#[test]
+fn a_full_block_that_kept_a_focus_loss_owes_it_to_the_game_once_it_ends() {
+    let host = TestHost::new();
+    let headless = TestClient::register(
+        &host,
+        &Descriptors::with_claims(
+            "headless",
+            &[],
+            "claim \"Input\" {
+  mode = \"Exclusive\"
+  reason = \"r\"
+  full_block = true
+}
+",
+        ),
+        TestMesh::triangle(),
+    );
+    assert_eq!(headless.acquire(AmmCapability::Input).outcome, AmmAcquireOutcome::Granted);
+    assert!(amm_host_focus_lost());
+    assert!(!amm_host_take_focus_loss_owed());
+
+    headless.release_raw(AmmCapability::Input as u8);
+
+    assert!(amm_host_take_focus_loss_owed());
+    assert!(!amm_host_take_focus_loss_owed());
 }

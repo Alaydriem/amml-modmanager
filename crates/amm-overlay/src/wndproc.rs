@@ -7,10 +7,10 @@ use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, RECT, WPAR
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, GetClientRect, GetWindowLongPtrW, HTCLIENT, IDC_ARROW, IDC_HAND,
-    IDC_IBEAM, IsWindow, LoadCursorW, SIZE_MINIMIZED, SetCursor, SetWindowLongPtrW, WHEEL_DELTA, WM_CHAR,
-    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SIZE, WM_WINDOWPOSCHANGED,
+    IDC_IBEAM, IsWindow, LoadCursorW, PostMessageW, SIZE_MINIMIZED, SetCursor, SetWindowLongPtrW, WA_INACTIVE,
+    WHEEL_DELTA, WM_ACTIVATE, WM_ACTIVATEAPP, WM_CHAR, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KILLFOCUS, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_WINDOWPOSCHANGED,
 };
 
 use crate::call_scope::CallScope;
@@ -22,13 +22,18 @@ use crate::size_message::SizeMessage;
 use crate::uninstall_outcome::UninstallOutcome;
 
 /// The one window procedure subclass on the game window. It sends pointer moves, buttons, the wheel, `WM_CHAR` and
-/// focus loss to an `InputSink` in back-buffer pixels, swallows each message the sink consumes, and answers
+/// focus loss (`WM_KILLFOCUS`, `WM_ACTIVATE` with `WA_INACTIVE`, `WM_ACTIVATEAPP` with false) to an `InputSink` in
+/// back-buffer pixels, swallows each message the sink consumes, and answers
 /// `WM_SETCURSOR` while the sink says the cursor is free. Keys do not come through it.
 pub struct WndProcRouter;
 
 impl WndProcRouter {
     /// How long `uninstall` waits for a thread inside the sink.
     pub const DRAIN_TIMEOUT: Duration = Duration::from_millis(2000);
+    // the focus-loss messages, as bits of the swallowed and the replayed sets
+    const FOCUS_ACTIVATE: u8 = 1;
+    const FOCUS_ACTIVATEAPP: u8 = 2;
+    const FOCUS_KILLFOCUS: u8 = 4;
 
     /// Subclasses `hwnd` once and routes its input to `sink`. Installing again on the window it already has only
     /// switches routing back on. False when `hwnd` is null, the window is another one than the subclassed window,
@@ -98,6 +103,7 @@ impl WndProcRouter {
         state.set_closed(true);
         state.set_forwarding(false);
         state.clear_consumed();
+        state.clear_focus_replay();
         let mut outcome = UninstallOutcome::NotInstalled;
         if *window != 0 {
             if Self::restore_original(state, *window) {
@@ -128,6 +134,48 @@ impl WndProcRouter {
         RouterState::global().take_focus_lost()
     }
 
+    /// Lets the game's own window procedure see, once each, the focus-loss messages (`WM_ACTIVATE` with
+    /// `WA_INACTIVE`, `WM_ACTIVATEAPP` with false, `WM_KILLFOCUS`) the sink swallowed since the window last gained
+    /// focus. They are posted to the window and pass the sink, and readers of held keys are told of the focus loss
+    /// (`take_focus_lost`). Any thread. False when none was swallowed or no window is subclassed.
+    pub fn replay_focus_loss() -> bool {
+        let state = RouterState::global();
+        let window = state.lock_window();
+        if *window == 0 {
+            return false;
+        }
+        let bits = state.take_swallowed_focus();
+        if bits == 0 {
+            return false;
+        }
+        state.queue_replay(bits);
+        state.note_focus_lost();
+        let hwnd = HWND(*window as *mut _);
+        let messages = [
+            (Self::FOCUS_ACTIVATE, WM_ACTIVATE, WA_INACTIVE as usize),
+            (Self::FOCUS_ACTIVATEAPP, WM_ACTIVATEAPP, 0),
+            (Self::FOCUS_KILLFOCUS, WM_KILLFOCUS, 0),
+        ];
+        for (bit, message, wparam) in messages.into_iter().filter(|(bit, _, _)| bits & bit != 0) {
+            // SAFETY: the handle is the subclassed window, held under the window lock; a window that is gone fails
+            // the call
+            if unsafe { PostMessageW(Some(hwnd), message, WPARAM(wparam), LPARAM(0)) }.is_err() {
+                state.take_replay(bit);
+            }
+        }
+        true
+    }
+
+    // the swallowed-and-replayed bit of a focus-loss message, `None` for any other message
+    fn focus_loss_bit(message: u32, wparam: WPARAM) -> Option<u8> {
+        match message {
+            WM_KILLFOCUS => Some(Self::FOCUS_KILLFOCUS),
+            WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => Some(Self::FOCUS_ACTIVATE),
+            WM_ACTIVATEAPP if wparam.0 == 0 => Some(Self::FOCUS_ACTIVATEAPP),
+            _ => None,
+        }
+    }
+
     fn address() -> usize {
         Self::window_proc as *const () as usize
     }
@@ -156,6 +204,9 @@ impl WndProcRouter {
             curia::info!("game window procedure runs on its thread", { thread: thread });
         }
         if !state.active() {
+            return None;
+        }
+        if Self::focus_loss_bit(message, wparam).is_some_and(|bit| state.take_replay(bit)) {
             return None;
         }
         if message == WM_SETCURSOR && (lparam.0 & 0xFFFF) as u32 == HTCLIENT {
@@ -244,6 +295,8 @@ impl WndProcRouter {
                 | WM_MOUSEWHEEL
                 | WM_CHAR
                 | WM_KILLFOCUS
+                | WM_ACTIVATE
+                | WM_ACTIVATEAPP
         )
     }
 
@@ -266,14 +319,28 @@ impl WndProcRouter {
             WM_MBUTTONUP => Self::button(state, sink, hwnd, lparam, PointerButton::Middle, false),
             WM_MOUSEWHEEL => Self::wheel(state, sink, wparam),
             WM_CHAR => state.surrogates.feed(wparam.0 as u32).is_some_and(|codepoint| sink.char(codepoint)),
-            WM_KILLFOCUS => {
-                state.surrogates.reset();
-                state.note_focus_lost();
-                sink.focus_lost();
-                false
-            }
+            WM_KILLFOCUS | WM_ACTIVATE | WM_ACTIVATEAPP => match Self::focus_loss_bit(message, wparam) {
+                Some(bit) => Self::focus_lost(state, sink, bit),
+                None => {
+                    state.take_swallowed_focus();
+                    false
+                }
+            },
             _ => false,
         }
+    }
+
+    // a sink that swallows the focus loss keeps its held keys, so readers of held keys are told only when it does
+    // not; a swallowed message is kept for `replay_focus_loss` until the window gains focus again
+    fn focus_lost(state: &RouterState, sink: &dyn InputSink, bit: u8) -> bool {
+        state.surrogates.reset();
+        let swallow = sink.focus_lost();
+        if swallow {
+            state.note_swallowed_focus(bit);
+        } else {
+            state.note_focus_lost();
+        }
+        swallow
     }
 
     fn pointer(

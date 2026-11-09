@@ -2,6 +2,7 @@ use std::ffi::c_void;
 use std::io::Read;
 use std::path::Path;
 
+use amm_abi::convert::pointer_op::PointerOpCodec;
 use amm_abi::types::{
     AmmCallbacks, AmmCapability, AmmHandle, AmmRenderSize, AmmRenderSizeState, AmmScreenshotLayers, AmmStatus,
 };
@@ -10,6 +11,7 @@ use amm_core::services::icon::IconDecoder;
 use amm_core::structs::capture::ScreenshotLayers;
 use amm_core::structs::descriptor::Capability;
 use amm_core::structs::event::ModEvent;
+use amm_core::structs::input::PointerOp;
 use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::manager::TextureGrant;
 use amm_core::structs::menu::{MenuEntryId, MenuScreens};
@@ -316,6 +318,25 @@ impl ManagerLink {
         }
     }
 
+    /// Holds a game mouse button down, lets it go, or turns the wheel by `steps` notches (positive away from the
+    /// player). The rules of `send_key` apply: the mod must hold the `Input` lease, `NotPermitted` otherwise, and
+    /// while the panel is open or another mod holds `Input`. A wheel turn past 32 notches either way is
+    /// `InvalidArgument`. A manager queue full of button actions is `QueueFull`, and nothing changes. When the
+    /// manager lets go of a held button itself, the mod gets `ModEvent::FakeKeysReleased`. A manager older than ABI
+    /// 2.2 is `Unsupported`.
+    pub fn send_pointer(&self, op: PointerOp) -> Result<(), LinkError> {
+        let Some(send_pointer) = self.table.api().send_pointer else {
+            return Err(LinkError::from(AmmStatus::Unsupported));
+        };
+        let (code, value) = PointerOpCodec::encode(op);
+        // SAFETY: send_pointer takes plain values; the handle is this link's until drop
+        let status = unsafe { send_pointer(self.handle, code, value) };
+        match status {
+            AmmStatus::Ok => Ok(()),
+            other => Err(LinkError::from(other)),
+        }
+    }
+
     /// Turns the cursor mode on or off.
     pub fn set_cursor_mode(&self, on: bool) -> Result<(), LinkError> {
         let Some(set_cursor_mode) = self.table.api().set_cursor_mode else {
@@ -389,6 +410,17 @@ impl ManagerLink {
         // SAFETY: held_by_other takes plain values; the handle is this link's until drop
         let held = unsafe { held_by_other(self.handle, AmmCapability::from(capability) as u8) };
         held == 1
+    }
+
+    /// True while the manager panel is open. False on a manager older than ABI 2.2. Call it on the game thread: from
+    /// a frame callback (render thread) the host is busy and the answer is false.
+    pub fn panel_open(&self) -> bool {
+        let Some(panel_open) = self.table.api().panel_open else {
+            return false;
+        };
+        // SAFETY: panel_open takes a plain value; the handle is this link's until drop
+        let open = unsafe { panel_open(self.handle) };
+        open == 1
     }
 
     /// Places a button for this mod in the corner row, left of the Mods button, on `screens`. Returns the entry

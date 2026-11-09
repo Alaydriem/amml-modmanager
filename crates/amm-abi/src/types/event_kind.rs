@@ -28,7 +28,8 @@ pub enum AmmEventKind {
     /// Since 1.5. The person picked another language. Only a mod that has called `locale` gets it; the mod calls
     /// `locale` again.
     LocaleChanged,
-    /// Since 2.1. The manager let go of the fake keys the mod held with `send_key`, because the panel opened, the game
-    /// window lost focus, the world was left or the mod was disabled. The mod drops its own record of them. No field.
+    /// Since 2.1. The manager let go of the fake keys the mod held with `send_key`, or (since 2.2) the mouse buttons
+    /// it held with `send_pointer`, because the panel opened, the game window lost focus, the world was left or the
+    /// mod was disabled. The mod drops its own record of them. No field.
     FakeKeysReleased,
 }

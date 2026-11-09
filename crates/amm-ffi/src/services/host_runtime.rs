@@ -18,7 +18,7 @@ use amm_core::structs::event::ModEvent;
 use amm_core::structs::frame::{FrameInputData, LayerKind, UiEvent, UiEventKind};
 use amm_core::structs::icon::ModIcon;
 use amm_core::structs::input::GameViewport;
-use amm_core::structs::input::{FakeKeyOp, InputEvent, Modifiers, RouteDecision};
+use amm_core::structs::input::{FakeKeyOp, InputEvent, Modifiers, PointerOp, RouteDecision};
 use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::manager::TextureGrant;
 use amm_core::structs::menu::MenuScreens;
@@ -63,6 +63,8 @@ pub struct HostRuntime {
     poll_buffer: Vec<ModEvent>,
     // fake key presses taken from the manager that the host has not collected yet; the manager bounds the queue
     fake_ops: Vec<FakeKeyOp>,
+    // fake mouse actions taken from the manager that the host has not collected yet; the manager bounds the queue
+    fake_pointer_ops: Vec<PointerOp>,
     manager_version: String,
     now_ms: u64,
     // the size of the last size message; a message with the same size again is a resend
@@ -122,6 +124,7 @@ impl HostRuntime {
             panel_actions: Vec::new(),
             poll_buffer: vec![ModEvent::Enabled; Self::POLL_CHUNK],
             fake_ops: Vec::new(),
+            fake_pointer_ops: Vec::new(),
             manager_version,
             now_ms: 0,
             last_size_message: None,
@@ -433,6 +436,12 @@ impl HostRuntime {
         Ok(self.manager.key_down(index, vk))
     }
 
+    /// Whether the manager panel is open, for a live `handle`.
+    pub fn panel_open(&self, handle: AmmHandle) -> Result<bool, AmmStatus> {
+        self.index(handle)?;
+        Ok(self.manager.snapshot().panel_open)
+    }
+
     /// Sets the keys `handle` wants to see. See `ManagerService::watch_keys`.
     pub fn watch_keys(&mut self, handle: AmmHandle, vks: &[u32]) -> Result<(), AmmStatus> {
         let index = self.index(handle)?;
@@ -451,6 +460,23 @@ impl HostRuntime {
         self.manager.take_fake_keys(&mut self.fake_ops);
         let count = capacity.min(self.fake_ops.len());
         for (position, op) in self.fake_ops.drain(..count).enumerate() {
+            write(position, op);
+        }
+        count
+    }
+
+    /// Sends a fake mouse action for `handle`. See `ManagerService::send_pointer`.
+    pub fn send_pointer(&mut self, handle: AmmHandle, op: PointerOp) -> Result<(), AmmStatus> {
+        let index = self.index(handle)?;
+        self.manager.send_pointer(index, op).map_err(|error| AmmStatus::from(&error))
+    }
+
+    /// Moves up to `capacity` queued fake mouse actions, oldest first, to `write(position, op)` and returns how
+    /// many. The rest stay in `fake_pointer_ops` for the next call.
+    pub fn take_fake_pointer(&mut self, capacity: usize, mut write: impl FnMut(usize, PointerOp)) -> usize {
+        self.manager.take_fake_pointer(&mut self.fake_pointer_ops);
+        let count = capacity.min(self.fake_pointer_ops.len());
+        for (position, op) in self.fake_pointer_ops.drain(..count).enumerate() {
             write(position, op);
         }
         count
@@ -624,7 +650,12 @@ impl HostRuntime {
         }
     }
 
-    /// Lets go of every fake key the mods hold.
+    /// See `ManagerService::take_focus_loss_owed`.
+    pub fn take_focus_loss_owed(&mut self) -> bool {
+        self.manager.take_focus_loss_owed()
+    }
+
+    /// Lets go of every fake key and mouse button the mods hold.
     pub fn release_fake_keys(&mut self) {
         self.manager.release_fake_keys();
     }
@@ -638,12 +669,17 @@ impl HostRuntime {
     }
 
     /// Hands the due config writes to the writer, gives the manager the screenshots the writer finished, ages the
-    /// captures no Present has taken, and logs telemetry each interval when it is on.
+    /// captures no Present has taken, logs the fake mouse actions a full queue evicted or refused since the last tick, and
+    /// logs telemetry each interval when it is on.
     pub fn tick(&mut self, now_ms: u64) {
         self.now_ms = now_ms.max(self.now_ms);
         self.flush_writes(self.now_ms);
         CaptureRelay::collect_written(&mut self.manager, self.io.as_ref());
         self.manager.tick_captures();
+        let pointer_drops = self.manager.take_pointer_drops();
+        if pointer_drops > 0 {
+            curia::warn!("fake pointer queue full, wheel actions evicted or actions refused", { dropped: pointer_drops });
+        }
         let config = self.manager.config();
         let interval_ms = u64::from(config.telemetry_interval_secs) * Self::MS_PER_SEC;
         if config.telemetry && self.now_ms.saturating_sub(self.last_telemetry_ms) >= interval_ms {
@@ -656,7 +692,7 @@ impl HostRuntime {
     }
 
     /// Publishes what other threads read without the lock: the holder book when a holder changed, the end of the
-    /// last toast, whether the menu button is placed, whether the player's turn is blocked, whether a capture
+    /// last toast, whether the menu button is placed, whether the player's turn and the gamepad are blocked, whether a capture
     /// is in flight, and the forced render size. It allocates only when a holder changed.
     pub fn publish_shared(&mut self) {
         let indices = Capability::ALL.map(|cap| self.holder_of(cap));
@@ -673,7 +709,12 @@ impl HostRuntime {
         let last = self.manager.toasts().visible(0, u64::MAX).map(|toast| toast.created_ms).max();
         self.shared.set_toast_until(last.map_or(0, |created| created.saturating_add(PanelModel::TOAST_TTL_MS)));
         self.shared.set_menu_button_placed(self.manager.menu_button_rect().is_some());
-        self.shared.set_blocks_player_turn(self.shared.snapshot().load().blocks_player_turn);
+        let (blocks_turn, blocks_gamepad) = {
+            let snapshot = self.shared.snapshot().load();
+            (snapshot.blocks_player_turn, snapshot.blocks_gamepad)
+        };
+        self.shared.set_blocks_player_turn(blocks_turn);
+        self.shared.set_blocks_gamepad(blocks_gamepad);
         let pending = !self.manager.pending_captures().as_slice().is_empty();
         self.shared.set_capturing(pending || self.captures.is_active() || self.stream.needs_present());
         self.shared.set_forced_size(self.manager.render_size().forced());

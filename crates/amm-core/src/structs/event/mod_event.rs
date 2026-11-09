@@ -61,8 +61,8 @@ pub enum ModEvent {
     /// The person picked another language in the manager. Only a mod that has read the language code gets it;
     /// the mod reads the code again.
     LocaleChanged,
-    /// The manager let go of the fake keys the mod held: the panel opened, the window lost focus, the world was
-    /// left or the mod was disabled. The mod drops its own record of them.
+    /// The manager let go of the fake keys or mouse buttons the mod held: the panel opened, the window lost focus,
+    /// the world was left or the mod was disabled. The mod drops its own record of them.
     FakeKeysReleased,
 }
 

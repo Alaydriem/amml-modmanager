@@ -128,6 +128,12 @@ impl HostCell {
         self.shared.load().as_ref().is_some_and(|shared| shared.blocks_player_turn())
     }
 
+    /// True while the active exclusive Input holder has a `full_block` claim. It reads the lock-free state only, so
+    /// the thread that polls the gamepad never waits on the host lock; false without a host.
+    pub fn blocks_gamepad(&self) -> bool {
+        self.shared.load().as_ref().is_some_and(|shared| shared.blocks_gamepad())
+    }
+
     pub fn set_console(&self, callback: Option<AmmHostConsoleCallback>) {
         *self.console.lock().unwrap_or_else(PoisonError::into_inner) = callback;
     }

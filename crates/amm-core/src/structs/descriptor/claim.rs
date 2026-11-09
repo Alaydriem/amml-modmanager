@@ -11,4 +11,6 @@ pub struct Claim {
     pub block_player_turn: bool,
     // only meaningful on an Input claim: the game keeps the pointer motion while the claim is active
     pub pass_pointer_motion: bool,
+    // only meaningful on an Exclusive Input claim: every input event is blocked from the game while the claim is active
+    pub full_block: bool,
 }

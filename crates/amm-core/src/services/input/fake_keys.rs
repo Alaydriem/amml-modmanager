@@ -4,8 +4,8 @@ use crate::structs::registry::{ModIndex, ModMask};
 /// The keys mods hold down for the game with fake presses, and the presses still to send. One 256-bit set per
 /// mod slot. A key goes down when the first mod holds it and up when the last mod lets it go. Game thread.
 ///
-/// Bounds: `held` is one set per mod slot. A hold that finds `MAX_OPS` presses queued is refused. A release always
-/// queues its up, and there are at most as many of those as keys held.
+/// Bounds: `held` is one set per mod slot. A hold or a game up that finds `MAX_OPS` presses queued is refused. A
+/// release always queues its up, and there are at most as many of those as keys held.
 pub struct FakeKeys {
     held: [[u64; 4]; ModMask::CAPACITY],
     ops: Vec<FakeKeyOp>,
@@ -69,6 +69,18 @@ impl FakeKeys {
         lost
     }
 
+    /// Lets go of every key of every mod except `keep`. Returns the mods that held any. `keep` holds its keys, so a
+    /// key it shares with a released mod stays down.
+    pub fn release_all_except(&mut self, keep: ModIndex) -> ModMask {
+        let mut lost = ModMask::default();
+        for slot in 0..ModMask::CAPACITY as u8 {
+            if slot != keep.0 {
+                lost.0 |= self.release_mod(ModIndex(slot)).0;
+            }
+        }
+        lost
+    }
+
     /// True when any mod holds `vk`.
     pub fn is_held(&self, vk: u32) -> bool {
         Self::locate(vk).is_some_and(|(word, bit)| self.held.iter().any(|set| set[word] & bit != 0))
@@ -96,6 +108,16 @@ impl FakeKeys {
                 at += 1;
             }
         }
+    }
+
+    /// Queues the up of a real key the game saw go down, so the game lets it go. Refused, with false, when
+    /// `MAX_OPS` presses wait, as a hold is.
+    pub fn queue_game_up(&mut self, vk: u32) -> bool {
+        if Self::locate(vk).is_none() || self.ops.len() >= Self::MAX_OPS {
+            return false;
+        }
+        self.ops.push(FakeKeyOp { vk, down: false });
+        true
     }
 
     fn locate(vk: u32) -> Option<(usize, u64)> {

@@ -17,6 +17,7 @@ entries = [
   "ClientInstance.isShowingMenu",
   # optional: each one missing turns off only its own feature
   "LocalPlayer.applyTurnDelta",
+  "GameControllerHandler_GameCore.refresh",
   "ClientInstance.onPlayerLoaded",
   "ClientExitLevel.hook",
   "ClientInstance.getTopScreenName",

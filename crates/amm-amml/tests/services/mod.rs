@@ -1,4 +1,5 @@
 mod fake_key_sender;
+mod fake_pointer_sender;
 mod frame_state;
 mod game_hook_set;
 mod game_pointer;

@@ -67,12 +67,28 @@ impl FakeTable {
             capture_stream_give_back: Some(Self::capture_stream_give_back),
             watch_keys: Some(Self::watch_keys),
             send_key: Some(Self::send_key),
+            send_pointer: Some(Self::send_pointer),
+            panel_open: Some(Self::panel_open),
         }
     }
 
     /// A table of ABI minor 0: it ends before `watch_keys`, and both slots are null.
     pub fn api_minor_0() -> AmmApi {
-        AmmApi { size: AmmApi::BASE_SIZE as u32, abi_minor: 0, watch_keys: None, send_key: None, ..Self::api() }
+        AmmApi {
+            size: AmmApi::BASE_SIZE as u32,
+            abi_minor: 0,
+            watch_keys: None,
+            send_key: None,
+            send_pointer: None,
+            panel_open: None,
+            ..Self::api()
+        }
+    }
+
+    /// A table of ABI minor 1: it ends after `send_key`, and `send_pointer` and `panel_open` are null.
+    pub fn api_minor_1() -> AmmApi {
+        let size = std::mem::offset_of!(AmmApi, send_pointer) as u32;
+        AmmApi { size, abi_minor: 1, send_pointer: None, panel_open: None, ..Self::api() }
     }
 
     /// `api` leaked, so it lives for the rest of the process as the manager's table does.
@@ -358,6 +374,10 @@ impl FakeTable {
         u8::from(Self::with(|state| state.held_by_other.get(&capability).copied().unwrap_or(false)))
     }
 
+    unsafe extern "C" fn panel_open(_: AmmHandle) -> u8 {
+        u8::from(Self::with(|state| state.panel_open))
+    }
+
     unsafe extern "C" fn register_menu_entry(
         _: AmmHandle,
         label: *const u8,
@@ -526,6 +546,13 @@ impl FakeTable {
         Self::with(|state| {
             state.sent_key_calls.push((vk, down == 1));
             state.send_key_status
+        })
+    }
+
+    unsafe extern "C" fn send_pointer(_: AmmHandle, op: u32, value: i32) -> AmmStatus {
+        Self::with(|state| {
+            state.sent_pointer_calls.push((op, value));
+            state.send_pointer_status
         })
     }
 

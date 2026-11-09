@@ -1,4 +1,6 @@
-use super::{FakeKeySender, FrameState, HudControl, KeyState, MenuScreen, MouseGrab, StopLatch, TickService};
+use super::{
+    FakeKeySender, FakePointerSender, FrameState, HudControl, KeyState, MenuScreen, MouseGrab, StopLatch, TickService,
+};
 
 /// The state the detours, the overlay host, the input sink and the lifecycle share.
 pub struct ManagerState {
@@ -10,6 +12,7 @@ pub struct ManagerState {
     grab: MouseGrab,
     hud: HudControl,
     fake_keys: FakeKeySender,
+    fake_pointer: FakePointerSender,
 }
 
 impl ManagerState {
@@ -23,6 +26,7 @@ impl ManagerState {
             grab: MouseGrab::new(),
             hud: HudControl::new(),
             fake_keys: FakeKeySender::new(),
+            fake_pointer: FakePointerSender::new(),
         }
     }
 
@@ -61,6 +65,10 @@ impl ManagerState {
 
     pub fn fake_keys(&self) -> &FakeKeySender {
         &self.fake_keys
+    }
+
+    pub fn fake_pointer(&self) -> &FakePointerSender {
+        &self.fake_pointer
     }
 }
 

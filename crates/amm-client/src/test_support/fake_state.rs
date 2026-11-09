@@ -40,6 +40,8 @@ pub struct FakeState {
     pub screenshot_layers: Vec<u8>,
     // The answer to `held_by_other` per capability; a capability not in the map is not held by another mod
     pub held_by_other: HashMap<Capability, bool>,
+    // The answer to `panel_open`
+    pub panel_open: bool,
     pub texture_grant: TextureGrant,
     // (label, mark, screens) of each `register_menu_entry` call, and the id it answers with
     pub menu_entries: Vec<(String, String, u8)>,
@@ -85,6 +87,9 @@ pub struct FakeState {
     // the (vk, down) of each `send_key` call, and the status it answers with
     pub sent_key_calls: Vec<(u32, bool)>,
     pub send_key_status: AmmStatus,
+    // the (op, value) of each `send_pointer` call, and the status it answers with
+    pub sent_pointer_calls: Vec<(u32, i32)>,
+    pub send_pointer_status: AmmStatus,
 }
 
 impl FakeState {
@@ -111,6 +116,7 @@ impl FakeState {
             screenshot_requests: Vec::new(),
             screenshot_layers: Vec::new(),
             held_by_other: HashMap::new(),
+            panel_open: false,
             texture_grant: TextureGrant { bytes: 0, count: 0 },
             menu_entries: Vec::new(),
             menu_entry_id: 1,
@@ -138,6 +144,8 @@ impl FakeState {
             watch_keys_status: AmmStatus::Ok,
             sent_key_calls: Vec::new(),
             send_key_status: AmmStatus::Ok,
+            sent_pointer_calls: Vec::new(),
+            send_pointer_status: AmmStatus::Ok,
         }
     }
 
@@ -149,6 +157,11 @@ impl FakeState {
     /// The `(vk, down)` of each `send_key` call, in order.
     pub fn sent_keys(&self) -> Vec<(u32, bool)> {
         self.sent_key_calls.clone()
+    }
+
+    /// The `(op, value)` of each `send_pointer` call, in order.
+    pub fn sent_pointer(&self) -> Vec<(u32, i32)> {
+        self.sent_pointer_calls.clone()
     }
 
     /// True when a mod registered and gave neither a frame nor a textures-lost callback.

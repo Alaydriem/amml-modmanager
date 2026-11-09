@@ -11,7 +11,7 @@ use super::HolderBook;
 
 /// The host state other threads read without the host lock: the render snapshot, the live generation of each
 /// slot (for `log`), the holder book (for `holder`), the end of the last visible toast, whether the menu button
-/// is placed, whether the player's turn is blocked, whether a screenshot capture is in flight, the owners
+/// is placed, whether the player's turn is blocked, whether the gamepad is blocked, whether a screenshot capture is in flight, the owners
 /// whose textures must be dropped, the forced render size (for `ResizeBuffers` and the window procedure), whether
 /// the render size needs every frame, whether the game window changed since the last frame, and the back buffer of
 /// the last Present. Every field is fixed in size.
@@ -22,6 +22,7 @@ pub struct HostShared {
     toast_until_ms: AtomicU64,
     menu_button_placed: AtomicBool,
     blocks_player_turn: AtomicBool,
+    blocks_gamepad: AtomicBool,
     capturing: AtomicBool,
     freed_owners: AtomicU32,
     // the forced render size packed by `pack`, 0 for none
@@ -47,6 +48,7 @@ impl HostShared {
             toast_until_ms: AtomicU64::new(0),
             menu_button_placed: AtomicBool::new(false),
             blocks_player_turn: AtomicBool::new(false),
+            blocks_gamepad: AtomicBool::new(false),
             capturing: AtomicBool::new(false),
             freed_owners: AtomicU32::new(0),
             forced_size: AtomicU64::new(0),
@@ -105,6 +107,15 @@ impl HostShared {
     /// True while an active Input holder asks for the player's own turn to be blocked.
     pub fn blocks_player_turn(&self) -> bool {
         self.blocks_player_turn.load(Ordering::Relaxed)
+    }
+
+    pub fn set_blocks_gamepad(&self, blocks: bool) {
+        self.blocks_gamepad.store(blocks, Ordering::Relaxed);
+    }
+
+    /// True while the active exclusive Input holder has a `full_block` claim.
+    pub fn blocks_gamepad(&self) -> bool {
+        self.blocks_gamepad.load(Ordering::Relaxed)
     }
 
     pub fn set_capturing(&self, capturing: bool) {

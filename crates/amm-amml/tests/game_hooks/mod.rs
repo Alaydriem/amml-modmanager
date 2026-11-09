@@ -1,3 +1,4 @@
+mod gamepad;
 mod grab;
 mod keys;
 mod mouse;

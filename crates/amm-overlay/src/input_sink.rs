@@ -14,8 +14,9 @@ pub trait InputSink: Sync {
     /// One Unicode code point of text input. Surrogate pairs are already joined.
     fn char(&self, codepoint: u32) -> bool;
 
-    /// The game window lost focus.
-    fn focus_lost(&self);
+    /// The game window lost focus (`WM_KILLFOCUS`, `WM_ACTIVATE` with `WA_INACTIVE`, `WM_ACTIVATEAPP` with false).
+    /// True swallows the message: the game's own window procedure does not see it.
+    fn focus_lost(&self) -> bool;
 
     /// The size the game gets in `WM_SIZE`, given the `minimised` flag and the size the message carries, or
     /// `None` to pass the message on unchanged.

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use windows::Win32::UI::WindowsAndMessaging::WNDPROC;
@@ -32,6 +32,11 @@ pub(crate) struct RouterState {
     // set by the window thread on focus loss and taken by a reader on another thread: the release store pairs with
     // the acquire swap in `take_focus_lost`
     focus_lost: AtomicBool,
+    // the focus-loss messages the sink swallowed since the window last gained focus, as `WndProcRouter` focus bits
+    swallowed_focus: AtomicU8,
+    // the focus-loss messages `WndProcRouter::replay_focus_loss` posted, which pass the sink: the release `fetch_or`
+    // in `queue_replay` pairs with the acquire `fetch_and` in `take_replay` on the window thread
+    replay: AtomicU8,
     pub(crate) calls: InFlight,
     pub(crate) surrogates: SurrogateJoin,
 }
@@ -49,6 +54,8 @@ impl RouterState {
             sink: AtomicPtr::new(std::ptr::null_mut()),
             consumed: [const { AtomicBool::new(false) }; PointerButton::COUNT],
             focus_lost: AtomicBool::new(false),
+            swallowed_focus: AtomicU8::new(0),
+            replay: AtomicU8::new(0),
             calls: InFlight::new(),
             surrogates: SurrogateJoin::new(),
         }
@@ -142,5 +149,28 @@ impl RouterState {
 
     pub(crate) fn take_focus_lost(&self) -> bool {
         self.focus_lost.swap(false, Ordering::Acquire)
+    }
+
+    pub(crate) fn note_swallowed_focus(&self, bit: u8) {
+        self.swallowed_focus.fetch_or(bit, Ordering::Relaxed);
+    }
+
+    pub(crate) fn take_swallowed_focus(&self) -> u8 {
+        self.swallowed_focus.swap(0, Ordering::Relaxed)
+    }
+
+    pub(crate) fn queue_replay(&self, bits: u8) {
+        self.replay.fetch_or(bits, Ordering::Release);
+    }
+
+    /// True once for a focus-loss message `queue_replay` named, which then goes to the original procedure.
+    pub(crate) fn take_replay(&self, bit: u8) -> bool {
+        self.replay.fetch_and(!bit, Ordering::AcqRel) & bit != 0
+    }
+
+    /// Forgets the swallowed and the queued focus-loss messages.
+    pub(crate) fn clear_focus_replay(&self) {
+        self.swallowed_focus.store(0, Ordering::Relaxed);
+        self.replay.store(0, Ordering::Release);
     }
 }

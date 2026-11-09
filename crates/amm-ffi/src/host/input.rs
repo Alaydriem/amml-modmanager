@@ -1,9 +1,10 @@
+use amm_abi::convert::pointer_op::PointerOpCodec;
 use amm_core::structs::frame::UiEvent;
 use amm_core::structs::input::{InputEvent, Modifiers};
 use amm_core::structs::render::RenderSize;
 
 use crate::services::{Boundary, HostCell};
-use crate::types::{AmmHostFakeKey, AmmHostPointerKind, AmmHostRoute};
+use crate::types::{AmmHostFakeKey, AmmHostFakePointer, AmmHostPointerKind, AmmHostRoute};
 
 /// A key from the window or the game. `mods` is a mask: 1 Ctrl, 2 Shift, 4 Alt. `consume` in the answer means the
 /// game must not see the key.
@@ -38,9 +39,19 @@ pub extern "C" fn amm_host_char(ch: u32) -> AmmHostRoute {
         .unwrap_or(AmmHostRoute::PASS)
 }
 
-/// The game window lost focus: every held key and button is released to the mods that got its press.
-pub extern "C" fn amm_host_focus_lost() {
-    let _ = Boundary::guard(|| HostCell::global().with(|runtime| Ok(runtime.route(InputEvent::FocusLost, 0))));
+/// The game window lost focus: every held key and button is released to the mods that got its press. True when
+/// the game must not see the focus loss: an exclusive Input holder with `full_block` is active, and it keeps its
+/// held keys and fake keys. False with no host.
+pub extern "C" fn amm_host_focus_lost() -> bool {
+    Boundary::guard(|| HostCell::global().with(|runtime| Ok(runtime.route(InputEvent::FocusLost, 0).consume)))
+        .unwrap_or(false)
+}
+
+/// Game thread, once per tick. True once after a full block ended that had kept a focus loss from the game, unless
+/// the game has seen a focus loss since: the caller then lets the game's window procedure see one focus loss while
+/// the window is in the background. False with no host.
+pub extern "C" fn amm_host_take_focus_loss_owed() -> bool {
+    Boundary::guard(|| HostCell::global().with(|runtime| Ok(runtime.take_focus_loss_owed()))).unwrap_or(false)
 }
 
 /// Game thread, once per tick. Moves up to `capacity` fake key presses the mods asked for with `send_key` into
@@ -67,8 +78,34 @@ pub unsafe extern "C" fn amm_host_take_fake_keys(out: *mut AmmHostFakeKey, capac
     .unwrap_or(0)
 }
 
-/// Game thread. Lets go of every fake key the mods hold: the releases wait for the next `amm_host_take_fake_keys`,
-/// and each mod that lost a key gets `FakeKeysReleased`. Does nothing with no host.
+/// Game thread, once per tick. Moves up to `capacity` fake mouse actions the mods asked for with `send_pointer` into
+/// `out`, oldest first, and returns how many it wrote; the rest wait for the next call. The caller feeds each action
+/// to the game as mouse input. 0, with nothing written, with no host or with a null or unaligned `out`.
+///
+/// # Safety
+///
+/// `out` is null or has room for `capacity` entries, writable for the call.
+pub unsafe extern "C" fn amm_host_take_fake_pointer(out: *mut AmmHostFakePointer, capacity: usize) -> usize {
+    Boundary::guard(|| {
+        if capacity == 0 {
+            return Ok(0);
+        }
+        let out = Boundary::writable(out)?;
+        HostCell::global().with(|runtime| {
+            Ok(runtime.take_fake_pointer(capacity, |position, op| {
+                let (op, value) = PointerOpCodec::encode(op);
+                // SAFETY: out is non-null and aligned, as checked, and the caller gives room for `capacity`
+                // entries; position is below capacity
+                unsafe { out.add(position).write(AmmHostFakePointer { op, value }) }
+            }))
+        })
+    })
+    .unwrap_or(0)
+}
+
+/// Game thread. Lets go of every fake key and mouse button the mods hold: the releases wait for the next
+/// `amm_host_take_fake_keys` and `amm_host_take_fake_pointer`, and each mod that lost one gets `FakeKeysReleased`.
+/// Does nothing with no host.
 pub extern "C" fn amm_host_release_fake_keys() {
     let _ = Boundary::guard(|| {
         HostCell::global().with(|runtime| {

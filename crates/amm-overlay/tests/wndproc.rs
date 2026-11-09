@@ -8,10 +8,10 @@ use amm_overlay::{PointerButton, UninstallOutcome, WndProcRouter};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, HTCLIENT, MSG, PostMessageW, PostThreadMessageW, SIZE_MINIMIZED, SIZE_RESTORED,
-    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, TranslateMessage, WINDOWPOS, WM_CHAR, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_SETCURSOR,
-    WM_SIZE, WM_WINDOWPOSCHANGED,
+    DispatchMessageW, GetMessageW, HTCLIENT, MSG, PM_REMOVE, PeekMessageW, PostMessageW, PostThreadMessageW,
+    SIZE_MINIMIZED, SIZE_RESTORED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, TranslateMessage, WA_ACTIVE,
+    WA_INACTIVE, WINDOWPOS, WM_ACTIVATE, WM_ACTIVATEAPP, WM_CHAR, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_SETCURSOR, WM_SIZE, WM_WINDOWPOSCHANGED,
 };
 
 use super::support::message_log::{MessageLog, Seen};
@@ -39,6 +39,19 @@ impl Setup {
     fn send(&self, message: u32, wparam: usize, lparam: isize) -> isize {
         // SAFETY: the window is live and belongs to this thread
         unsafe { SendMessageW(self.window.hwnd, message, Some(WPARAM(wparam)), Some(LPARAM(lparam))) }.0
+    }
+
+    // dispatches every message posted to this thread's windows
+    fn pump(&self) {
+        let mut message = MSG::default();
+        // SAFETY: the out pointer is a writable local, and the messages are this thread's
+        while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+            // SAFETY: a message just taken from the queue
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
     }
 
     fn position(x: i16, y: i16) -> isize {
@@ -140,6 +153,48 @@ fn losing_focus_tells_the_sink_once_and_the_game_still_sees_it() {
     assert!(WndProcRouter::take_focus_lost());
     assert!(!WndProcRouter::take_focus_lost());
     assert_eq!(MessageLog::bottom_seen().len(), 1);
+}
+
+#[test]
+fn focus_messages_are_swallowed_when_the_sink_says_so() {
+    let setup = Setup::new();
+    setup.sink.swallow_focus.store(true, Ordering::SeqCst);
+
+    setup.send(WM_KILLFOCUS, 0, 0);
+    setup.send(WM_ACTIVATE, WA_INACTIVE as usize, 0);
+    setup.send(WM_ACTIVATEAPP, 0, 0);
+
+    assert_eq!(setup.sink.focus_lost_calls.load(Ordering::SeqCst), 3);
+    assert!(MessageLog::bottom_seen().is_empty());
+    assert!(!WndProcRouter::take_focus_lost());
+}
+
+#[test]
+fn focus_messages_reach_the_game_when_the_sink_does_not_swallow_them() {
+    let setup = Setup::new();
+
+    setup.send(WM_ACTIVATE, WA_INACTIVE as usize, 0);
+    setup.send(WM_ACTIVATEAPP, 0, 0);
+    setup.send(WM_ACTIVATE, WA_ACTIVE as usize, 0);
+    setup.send(WM_ACTIVATEAPP, 1, 0);
+
+    // the default procedure of the test window moves the real focus too, so it can add a WM_KILLFOCUS of its own
+    let seen = MessageLog::bottom_seen();
+    for (message, wparam) in
+        [(WM_ACTIVATE, WA_INACTIVE), (WM_ACTIVATEAPP, 0), (WM_ACTIVATE, WA_ACTIVE), (WM_ACTIVATEAPP, 1)]
+    {
+        assert!(seen.contains(&Seen { message, wparam: wparam as usize, lparam: 0 }), "{message:#x} {wparam}");
+    }
+    let losses = seen
+        .iter()
+        .filter(|seen| {
+            seen.message == WM_KILLFOCUS
+                || (seen.message == WM_ACTIVATE && seen.wparam & 0xFFFF == WA_INACTIVE as usize)
+                || (seen.message == WM_ACTIVATEAPP && seen.wparam == 0)
+        })
+        .count();
+    assert_eq!(setup.sink.focus_lost_calls.load(Ordering::SeqCst) as usize, losses);
+    assert!(WndProcRouter::take_focus_lost());
 }
 
 #[test]
@@ -348,4 +403,50 @@ fn a_window_change_after_uninstall_does_not_reach_the_sink() {
     assert_eq!(WndProcRouter::uninstall(), UninstallOutcome::Restored);
     setup.send(WM_DISPLAYCHANGE, 32, Setup::position(2560, 1440));
     assert_eq!(setup.sink.window_changed_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_replayed_focus_loss_gives_the_game_each_swallowed_message_once_past_the_sink() {
+    let setup = Setup::new();
+    setup.sink.swallow_focus.store(true, Ordering::SeqCst);
+    setup.send(WM_ACTIVATE, WA_INACTIVE as usize, 0);
+    setup.send(WM_ACTIVATEAPP, 0, 0);
+    assert!(MessageLog::bottom_seen().is_empty());
+
+    assert!(WndProcRouter::replay_focus_loss());
+    setup.pump();
+
+    let seen: Vec<Seen> = MessageLog::bottom_seen()
+        .into_iter()
+        .filter(|seen| matches!(seen.message, WM_ACTIVATE | WM_ACTIVATEAPP | WM_KILLFOCUS))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            Seen { message: WM_ACTIVATE, wparam: WA_INACTIVE as usize, lparam: 0 },
+            Seen { message: WM_ACTIVATEAPP, wparam: 0, lparam: 0 },
+        ]
+    );
+    assert_eq!(setup.sink.focus_lost_calls.load(Ordering::SeqCst), 2);
+    assert!(WndProcRouter::take_focus_lost());
+    assert!(!WndProcRouter::replay_focus_loss());
+}
+
+#[test]
+fn a_focus_gain_clears_the_swallowed_focus_loss() {
+    let setup = Setup::new();
+    setup.sink.swallow_focus.store(true, Ordering::SeqCst);
+    setup.send(WM_KILLFOCUS, 0, 0);
+
+    setup.send(WM_ACTIVATEAPP, 1, 0);
+
+    assert!(!WndProcRouter::replay_focus_loss());
+}
+
+#[test]
+fn a_focus_loss_the_game_saw_leaves_nothing_to_replay() {
+    let setup = Setup::new();
+    setup.send(WM_ACTIVATEAPP, 0, 0);
+
+    assert!(!WndProcRouter::replay_focus_loss());
 }

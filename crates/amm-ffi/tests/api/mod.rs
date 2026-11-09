@@ -1,7 +1,9 @@
 mod capture;
 mod contract;
 mod icon;
+mod input_query;
 mod key_output;
 mod locale;
 mod menu;
 mod picture;
+mod pointer_output;

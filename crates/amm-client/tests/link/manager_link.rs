@@ -8,6 +8,7 @@ use amm_core::errors::LinkError;
 use amm_core::services::icon::IconDecoder;
 use amm_core::structs::descriptor::Capability;
 use amm_core::structs::event::{KeybindPhase, ModEvent};
+use amm_core::structs::input::{PointerButton, PointerOp};
 use amm_core::structs::mesh::GamePicture;
 use amm_core::structs::registry::ModIndex;
 use amm_core::structs::render::{RenderSize, RenderSizeState};
@@ -526,6 +527,55 @@ fn send_key_on_minor_0_table_is_unsupported() {
     assert_eq!(link.send_key(0x10, true), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
     assert_eq!(link.watch_keys(&[0x57]), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
     assert!(FakeTable::with(|state| state.sent_keys().is_empty() && state.watched().is_empty()));
+}
+
+#[test]
+fn send_pointer_passes_the_abi_op_and_value() {
+    let link = FakeTable::link_without_frame();
+
+    assert_eq!(link.send_pointer(PointerOp::Button { button: PointerButton::Left, down: true }), Ok(()));
+    assert_eq!(link.send_pointer(PointerOp::Button { button: PointerButton::Right, down: false }), Ok(()));
+    assert_eq!(link.send_pointer(PointerOp::Button { button: PointerButton::Middle, down: true }), Ok(()));
+    assert_eq!(link.send_pointer(PointerOp::Wheel { steps: -3 }), Ok(()));
+
+    assert_eq!(FakeTable::with(|state| state.sent_pointer()), vec![(1, 1), (2, 0), (3, 1), (4, -3)]);
+}
+
+#[test]
+fn send_pointer_on_minor_1_table_is_unsupported() {
+    let link = FakeTable::link_without_frame_on(FakeTable::api_minor_1());
+
+    let sent = link.send_pointer(PointerOp::Wheel { steps: 1 });
+
+    assert_eq!(sent, Err(LinkError::Status(AmmStatus::Unsupported as i32)));
+    assert!(FakeTable::with(|state| state.sent_pointer().is_empty()));
+}
+
+#[test]
+fn panel_open_follows_the_manager_answer() {
+    let link = FakeTable::link_without_frame();
+    let closed = link.panel_open();
+    FakeTable::with(|state| state.panel_open = true);
+
+    assert_eq!((closed, link.panel_open()), (false, true));
+}
+
+#[test]
+fn panel_open_on_minor_1_table_is_false() {
+    let link = FakeTable::link_without_frame_on(FakeTable::api_minor_1());
+    FakeTable::with(|state| state.panel_open = true);
+
+    assert!(!link.panel_open());
+}
+
+#[test]
+fn send_pointer_maps_not_permitted() {
+    let link = FakeTable::link_without_frame();
+    FakeTable::with(|state| state.send_pointer_status = AmmStatus::NotPermitted);
+
+    let sent = link.send_pointer(PointerOp::Button { button: PointerButton::Left, down: true });
+
+    assert_eq!(sent, Err(LinkError::Status(AmmStatus::NotPermitted as i32)));
 }
 
 #[test]

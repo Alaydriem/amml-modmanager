@@ -1,17 +1,19 @@
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use amm_abi::convert::pointer_op::PointerOpCodec;
 use amm_abi::types::AmmStatus;
-use amm_core::structs::input::FakeKeyOp;
+use amm_core::structs::input::{FakeKeyOp, PointerOp};
 use amm_ffi::host::{
-    amm_host_blocks_player_turn, amm_host_create, amm_host_destroy, amm_host_game_point, amm_host_key,
-    amm_host_pointer, amm_host_release_fake_keys, amm_host_render_size_shutdown, amm_host_set_console,
-    amm_host_take_fake_keys, amm_host_tick, amm_host_world,
+    amm_host_blocks_gamepad, amm_host_blocks_player_turn, amm_host_create, amm_host_destroy, amm_host_game_point,
+    amm_host_key, amm_host_pointer, amm_host_release_fake_keys, amm_host_render_size_shutdown, amm_host_set_console,
+    amm_host_take_fake_keys, amm_host_take_fake_pointer, amm_host_take_focus_loss_owed, amm_host_tick, amm_host_world,
 };
-use amm_ffi::types::{AmmHostFakeKey, AmmHostPointerKind};
+use amm_ffi::types::{AmmHostFakeKey, AmmHostFakePointer, AmmHostPointerKind};
 use amm_overlay::{Overlay, PointerButton, ShutdownOutcome, SizeMessage, UninstallOutcome, WndProcRouter};
 use amml_msvc::{MemberCall, MsvcString};
 use amml_sdk::amml_abi::AmmlLogLevel;
@@ -26,7 +28,7 @@ use super::{
     AmmlHookHost, AmmlHookInstaller, ConsoleMirror, GameHookSet, GamePointer, GameSlots, LoaderHeap, ManagerInputSink,
     ManagerOverlayHost,
 };
-use crate::game_hooks::{key_down, key_up};
+use crate::game_hooks::{apply_turn_delta, feed, key_down, key_up};
 use crate::manager_mod::ManagerMod;
 use crate::paths::ManagerPaths;
 use crate::traits::GameCalls;
@@ -49,6 +51,7 @@ impl LiveCalls {
     const MOD_SHIFT: u8 = 2;
     const MOD_ALT: u8 = 4;
     const FAKE_KEY_BATCH: usize = 64;
+    const FAKE_POINTER_BATCH: usize = 64;
     const HUD_SLOTS: [GameSlot; 3] = [GameSlot::Options, GameSlot::SetHideGui, GameSlot::GetHideHud];
 
     pub fn new(api: Api, host: &'static ManagerOverlayHost, sink: &'static ManagerInputSink) -> Self {
@@ -146,12 +149,44 @@ impl GameCalls for LiveCalls {
         }
     }
 
+    fn take_fake_pointer(&self, out: &mut Vec<PointerOp>) {
+        let mut batch = [AmmHostFakePointer { op: 0, value: 0 }; Self::FAKE_POINTER_BATCH];
+        loop {
+            // SAFETY: `batch` is a writable local with room for `FAKE_POINTER_BATCH` entries
+            let taken = unsafe { amm_host_take_fake_pointer(batch.as_mut_ptr(), batch.len()) };
+            out.extend(batch.iter().take(taken).filter_map(|entry| PointerOpCodec::decode(entry.op, entry.value).ok()));
+            if taken < batch.len() {
+                return;
+            }
+        }
+    }
+
+    fn game_mouse(&self, device: usize, action: u8, data: i8, x: i16, y: i16) {
+        let original: extern "C" fn(usize, u8, i8, i16, i16, i16, i16, u8) = feed::GUARD.original_fn();
+        original(device, action, data, x, y, 0, 0, 0);
+    }
+
+    fn game_turn(&self, player: usize, pitch: f32, yaw: f32) {
+        // the slot is null while the turn hook is not installed; the trampoline then is not there to call
+        if apply_turn_delta::GUARD.original().load(Ordering::Acquire).is_null() {
+            return;
+        }
+        // `Vec2 { x: pitch, y: yaw }`, read by the game during the call
+        let delta = [pitch, yaw];
+        let original: extern "C" fn(usize, usize) = apply_turn_delta::GUARD.original_fn();
+        original(player, delta.as_ptr() as usize);
+    }
+
     fn host_pointer_delta(&self, dx: f32, dy: f32) -> bool {
         amm_host_pointer(AmmHostPointerKind::Delta as u8, dx, dy, 0, false, 0.0).consume
     }
 
     fn blocks_player_turn(&self) -> bool {
         amm_host_blocks_player_turn()
+    }
+
+    fn blocks_gamepad(&self) -> bool {
+        amm_host_blocks_gamepad()
     }
 
     fn modifiers(&self) -> u8 {
@@ -201,6 +236,14 @@ impl GameCalls for LiveCalls {
         // SAFETY: no input
         let foreground = unsafe { GetForegroundWindow() };
         Overlay::<AmmlHookInstaller>::game_window().is_some_and(|window| window == foreground)
+    }
+
+    fn take_focus_loss_owed(&self) -> bool {
+        amm_host_take_focus_loss_owed()
+    }
+
+    fn replay_focus_loss(&self) {
+        WndProcRouter::replay_focus_loss();
     }
 
     fn install_hooks(&self) -> Result<(), SdkError> {

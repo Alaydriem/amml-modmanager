@@ -3,10 +3,11 @@ use amm_abi::types::{AMM_ABI_MAJOR, AMM_ABI_MINOR, AmmApi};
 use super::{
     amm_acquire, amm_capture_stream_close, amm_capture_stream_free, amm_capture_stream_give_back,
     amm_capture_stream_lend, amm_capture_stream_request, amm_capture_stream_take, amm_config_document,
-    amm_game_picture, amm_held_by_other, amm_holder, amm_key_down, amm_locale, amm_log, amm_poll_events,
-    amm_present_count, amm_register, amm_register_menu_entry, amm_release, amm_render_size, amm_request_screenshot,
-    amm_request_screenshot_layers, amm_send_key, amm_set_cursor_mode, amm_set_game_viewport, amm_set_icon,
-    amm_set_render_size, amm_set_setting, amm_texture_budget, amm_unregister, amm_watch_keys,
+    amm_game_picture, amm_held_by_other, amm_holder, amm_key_down, amm_locale, amm_log, amm_panel_open,
+    amm_poll_events, amm_present_count, amm_register, amm_register_menu_entry, amm_release, amm_render_size,
+    amm_request_screenshot, amm_request_screenshot_layers, amm_send_key, amm_send_pointer, amm_set_cursor_mode,
+    amm_set_game_viewport, amm_set_icon, amm_set_render_size, amm_set_setting, amm_texture_budget, amm_unregister,
+    amm_watch_keys,
 };
 
 static API: AmmApi = AmmApi {
@@ -44,6 +45,8 @@ static API: AmmApi = AmmApi {
     capture_stream_give_back: Some(amm_capture_stream_give_back),
     watch_keys: Some(amm_watch_keys),
     send_key: Some(amm_send_key),
+    send_pointer: Some(amm_send_pointer),
+    panel_open: Some(amm_panel_open),
 };
 
 /// The function table for `abi_major`, or null when this manager does not speak that major version. The

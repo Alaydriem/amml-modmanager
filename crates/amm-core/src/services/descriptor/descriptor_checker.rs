@@ -166,6 +166,12 @@ impl DescriptorChecker {
             if claim.pass_pointer_motion && claim.capability != Capability::Input {
                 return Err(DescriptorError::PassMotionOnNonInputClaim);
             }
+            if claim.full_block && claim.capability != Capability::Input {
+                return Err(DescriptorError::FullBlockOnlyOnInput);
+            }
+            if claim.full_block && claim.mode != ClaimMode::Exclusive {
+                return Err(DescriptorError::FullBlockNeedsExclusive);
+            }
             if claim.capability == Capability::RenderSize && claim.mode != ClaimMode::Exclusive {
                 return Err(DescriptorError::SharedRenderSize);
             }

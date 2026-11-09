@@ -1,5 +1,6 @@
 pub mod host_console_callback;
 pub mod host_fake_key;
+pub mod host_fake_pointer;
 pub mod host_frame;
 pub mod host_frame_input;
 pub mod host_layer;
@@ -8,6 +9,7 @@ pub mod host_route;
 
 pub use host_console_callback::AmmHostConsoleCallback;
 pub use host_fake_key::AmmHostFakeKey;
+pub use host_fake_pointer::AmmHostFakePointer;
 pub use host_frame::{
     AMM_HOST_CAPTURE_MAX_FRAMES, AMM_HOST_GAME_PICTURE_TEXTURE, AMM_HOST_MAX_CAPTURES, AMM_HOST_MAX_STREAM_FRAMES,
     AmmHostFrame,

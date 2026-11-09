@@ -83,3 +83,35 @@ fn release_mod_keeps_the_keys_of_other_mods() {
     assert!(keys.is_held(VK_W));
     assert_eq!(ops(&mut keys), vec![FakeKeyOp { vk: VK_SHIFT, down: false }]);
 }
+
+#[test]
+fn release_all_except_keeps_the_kept_mods_keys() {
+    let mut keys = FakeKeys::new();
+    let (kept, other) = (ModIndex(0), ModIndex(1));
+    keys.hold(kept, VK_W);
+    keys.hold(other, VK_W);
+    keys.hold(other, VK_SHIFT);
+    ops(&mut keys);
+
+    let lost = keys.release_all_except(kept);
+
+    assert!(lost.contains(other) && !lost.contains(kept));
+    assert!(keys.is_held(VK_W));
+    assert!(!keys.is_held(VK_SHIFT));
+    assert_eq!(ops(&mut keys), vec![FakeKeyOp { vk: VK_SHIFT, down: false }]);
+}
+
+#[test]
+fn a_game_up_is_queued_and_refused_once_max_ops_wait() {
+    let mut keys = FakeKeys::new();
+    let m = ModIndex(0);
+
+    assert!(keys.queue_game_up(VK_W));
+    assert_eq!(ops(&mut keys), vec![FakeKeyOp { vk: VK_W, down: false }]);
+
+    for vk in 0..FakeKeys::MAX_OPS as u32 {
+        keys.hold(m, vk);
+    }
+    assert!(!keys.queue_game_up(VK_W));
+    assert_eq!(keys.pending(), FakeKeys::MAX_OPS);
+}

@@ -7,7 +7,7 @@ use amm_core::services::settings::ManagerConfigFile;
 use amm_core::structs::descriptor::{Capability, Chord};
 use amm_core::structs::event::{KeybindPhase, ModEvent};
 use amm_core::structs::frame::{CursorShape, FrameReplyData, LayerKind, MenuScreen};
-use amm_core::structs::input::{FakeKeyOp, InputEvent, Modifiers};
+use amm_core::structs::input::{FakeKeyOp, InputEvent, Modifiers, PointerButton, PointerOp, TurnAxis};
 use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::registry::ModIndex;
 use amm_core::structs::settings::{ConfigWarning, HclDocument};
@@ -19,6 +19,7 @@ const FREECAM: &str = include_str!("../../../fixtures/four_mods/freecam.hcl");
 const DEJAVU: &str = include_str!("../../../fixtures/four_mods/dejavu.hcl");
 const MINIMAP: &str = include_str!("../../../fixtures/four_mods/minimap.hcl");
 const LEVELS: &str = include_str!("../../../fixtures/four_mods/levels.hcl");
+const HEADLESS: &str = include_str!("../../../fixtures/four_mods/headless.hcl");
 
 const NO_MODS: Modifiers = Modifiers { ctrl: false, shift: false, alt: false };
 const CTRL: Modifiers = Modifiers { ctrl: true, shift: false, alt: false };
@@ -304,6 +305,23 @@ fn the_player_turn_is_blocked_only_while_a_flagged_input_holder_is_active() {
 
     manager.release(look, Capability::Input);
     assert!(!manager.snapshot().blocks_player_turn);
+}
+
+#[test]
+fn the_gamepad_is_blocked_only_while_a_full_block_holder_is_active() {
+    let mut manager = manager();
+    let headless = register(&mut manager, HEADLESS, "headless");
+    let owner = register(&mut manager, &input_holder("owner", "Exclusive", false), "owner");
+
+    manager.acquire(owner, Capability::Input, 0).expect("known");
+    assert!(!manager.snapshot().blocks_gamepad);
+    manager.release(owner, Capability::Input);
+
+    manager.acquire(headless, Capability::Input, 0).expect("known");
+    assert!(manager.snapshot().blocks_gamepad);
+
+    manager.release(headless, Capability::Input);
+    assert!(!manager.snapshot().blocks_gamepad);
 }
 
 #[test]
@@ -1224,4 +1242,428 @@ fn send_key_up_allowed_while_other_holds_input() {
     manager.acquire(other, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
 
     assert_eq!(manager.send_key(m, KEY_SHIFT, false), Ok(()));
+}
+
+fn headless_with_lease(manager: &mut ManagerService) -> ModIndex {
+    let index = register(manager, HEADLESS, "headless");
+    let outcome = manager.acquire(index, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
+    assert_eq!(outcome, AcquireOutcome::Granted);
+    events(manager, index);
+    index
+}
+
+#[test]
+fn focus_lost_under_full_block_keeps_the_holders_fake_keys() {
+    let mut manager = manager();
+    let headless = headless_with_lease(&mut manager);
+    manager.send_key(headless, KEY_W, true).expect("claims Input");
+    manager.route(&key(KEY_G, true, NO_MODS), 0);
+    events(&mut manager, headless);
+
+    let decision = manager.route(&InputEvent::FocusLost, 0);
+
+    assert!(decision.consume_from_game);
+    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W)]);
+    assert!(events(&mut manager, headless).is_empty());
+    assert!(manager.key_down(headless, KEY_G));
+}
+
+#[test]
+fn focus_lost_without_full_block_reaches_the_game() {
+    let mut manager = manager();
+    let m = toggles_with_lease(&mut manager);
+    manager.send_key(m, KEY_W, true).expect("claims Input");
+
+    let decision = manager.route(&InputEvent::FocusLost, 0);
+
+    assert!(!decision.consume_from_game);
+    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W), fake_up(KEY_W)]);
+}
+
+#[test]
+fn focus_lost_under_full_block_still_releases_other_mods_keys() {
+    let mut manager = manager();
+    let freecam = register(&mut manager, FREECAM, "freecam");
+    manager.acquire(freecam, Capability::Input, 0).expect("known");
+    let fly_forward = action(&manager, freecam, "fly_forward");
+    manager.route(&key(KEY_W, true, NO_MODS), 0);
+    manager.route(&key(KEY_G, true, NO_MODS), 0);
+    let headless = headless_with_lease(&mut manager);
+    events(&mut manager, freecam);
+
+    manager.route(&InputEvent::FocusLost, 0);
+
+    let up = |vk| ModEvent::Key { vk, down: false, repeat: false };
+    assert_eq!(
+        events(&mut manager, freecam),
+        vec![up(KEY_G), ModEvent::Keybind { action: fly_forward, phase: KeybindPhase::Released }]
+    );
+    assert!(events(&mut manager, headless).is_empty());
+}
+
+#[test]
+fn lease_end_after_focus_lost_runs_the_deferred_cleanup() {
+    let mut manager = manager();
+    let headless = headless_with_lease(&mut manager);
+    manager.send_key(headless, KEY_W, true).expect("claims Input");
+    manager.route(&key(KEY_G, true, NO_MODS), 0);
+    manager.route(&InputEvent::FocusLost, 0);
+    fake_ops(&mut manager);
+    events(&mut manager, headless);
+
+    manager.release(headless, Capability::Input);
+
+    assert_eq!(fake_ops(&mut manager), vec![fake_up(KEY_W)]);
+    let seen = events(&mut manager, headless);
+    assert!(seen.contains(&ModEvent::Key { vk: KEY_G, down: false, repeat: false }));
+    assert!(seen.contains(&ModEvent::FakeKeysReleased));
+    manager.acquire(headless, Capability::Input, 0).expect("known");
+    assert!(!manager.key_down(headless, KEY_G));
+}
+
+#[test]
+fn lease_release_sends_ups_for_the_holders_fake_keys() {
+    let mut manager = manager();
+    let headless = headless_with_lease(&mut manager);
+    manager.send_key(headless, KEY_W, true).expect("claims Input");
+    fake_ops(&mut manager);
+
+    manager.release(headless, Capability::Input);
+
+    assert_eq!(fake_ops(&mut manager), vec![fake_up(KEY_W)]);
+    assert!(events(&mut manager, headless).contains(&ModEvent::FakeKeysReleased));
+}
+
+fn pointer_ops(manager: &mut ManagerService) -> Vec<PointerOp> {
+    let mut out = Vec::new();
+    manager.take_fake_pointer(&mut out);
+    out
+}
+
+fn left(down: bool) -> PointerOp {
+    PointerOp::Button { button: PointerButton::Left, down }
+}
+
+#[test]
+fn send_pointer_queues_button_and_wheel_ops() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+
+    manager.send_pointer(m, left(true)).expect("claims Input");
+    manager.send_pointer(m, left(true)).expect("claims Input");
+    manager.send_pointer(m, PointerOp::Wheel { steps: -2 }).expect("claims Input");
+    manager.send_pointer(m, left(false)).expect("claims Input");
+
+    assert_eq!(pointer_ops(&mut manager), vec![left(true), PointerOp::Wheel { steps: -2 }, left(false)]);
+}
+
+#[test]
+fn send_pointer_needs_an_input_claim() {
+    let mut manager = manager();
+    let m = register(&mut manager, &descriptor("plain", &[("Hud", "Shared")], ""), "plain");
+
+    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::NotPermitted));
+    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::NotPermitted));
+    assert!(pointer_ops(&mut manager).is_empty());
+}
+
+#[test]
+fn send_pointer_wheel_past_the_step_limit_is_invalid() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    let limit = amm_core::services::input::FakePointer::MAX_WHEEL_STEPS;
+
+    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: limit + 1 }), Err(ManagerError::InvalidArgument));
+    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: -limit - 1 }), Err(ManagerError::InvalidArgument));
+    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 0 }), Ok(()));
+    assert!(pointer_ops(&mut manager).is_empty());
+}
+
+#[test]
+fn send_pointer_is_refused_while_the_panel_is_open() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    manager.set_panel_open(true);
+
+    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::NotPermitted));
+    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::NotPermitted));
+    assert!(pointer_ops(&mut manager).is_empty());
+}
+
+#[test]
+fn send_pointer_is_refused_while_another_mod_holds_input() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    manager.send_pointer(m, left(true)).expect("claims Input");
+    let other = register(&mut manager, &input_holder("other", "Shared", false), "other");
+    manager.acquire(other, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
+    pointer_ops(&mut manager);
+
+    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::NotPermitted));
+    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::NotPermitted));
+    assert_eq!(manager.send_pointer(m, left(false)), Ok(()));
+    assert!(pointer_ops(&mut manager).is_empty());
+}
+
+fn turn(axis: TurnAxis, millidegrees: i32) -> PointerOp {
+    PointerOp::Turn { axis, millidegrees }
+}
+
+#[test]
+fn a_turn_from_the_holder_is_queued() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+
+    manager.send_pointer(m, turn(TurnAxis::Yaw, 1500)).expect("claims Input");
+    manager.send_pointer(m, turn(TurnAxis::Pitch, -500)).expect("claims Input");
+    manager.send_pointer(m, turn(TurnAxis::Yaw, 0)).expect("a zero turn sends nothing");
+
+    assert_eq!(pointer_ops(&mut manager), vec![turn(TurnAxis::Pitch, -500), turn(TurnAxis::Yaw, 1500)]);
+}
+
+#[test]
+fn a_turn_from_a_mod_without_the_input_claim_is_refused() {
+    let mut manager = manager();
+    let m = register(&mut manager, &descriptor("plain", &[("Hud", "Shared")], ""), "plain");
+
+    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, 1000)), Err(ManagerError::NotPermitted));
+    assert!(pointer_ops(&mut manager).is_empty());
+}
+
+#[test]
+fn a_turn_past_the_bound_is_refused() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    let limit = amm_core::services::input::FakePointer::MAX_TURN_MILLIDEGREES;
+
+    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, limit + 1)), Err(ManagerError::InvalidArgument));
+    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Pitch, -limit - 1)), Err(ManagerError::InvalidArgument));
+    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, i32::MIN)), Err(ManagerError::InvalidArgument));
+    assert!(pointer_ops(&mut manager).is_empty());
+    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, limit)), Ok(()));
+    assert_eq!(pointer_ops(&mut manager), vec![turn(TurnAxis::Yaw, limit)]);
+}
+
+#[test]
+fn a_turn_is_refused_while_another_mod_holds_input() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    let other = register(&mut manager, &input_holder("other", "Shared", false), "other");
+    manager.acquire(other, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
+
+    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, 1000)), Err(ManagerError::NotPermitted));
+    assert!(pointer_ops(&mut manager).is_empty());
+}
+
+#[test]
+fn held_buttons_are_released_when_the_panel_opens() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    manager.send_pointer(m, left(true)).expect("claims Input");
+
+    manager.set_panel_open(true);
+
+    assert_eq!(pointer_ops(&mut manager), vec![left(true), left(false)]);
+    assert!(events(&mut manager, m).contains(&ModEvent::FakeKeysReleased));
+}
+
+#[test]
+fn held_buttons_are_released_when_the_world_is_left_or_the_mod_unregisters() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    manager.send_pointer(m, left(true)).expect("claims Input");
+    manager.world_left();
+    assert_eq!(pointer_ops(&mut manager), vec![left(true), left(false)]);
+
+    manager.send_pointer(m, left(true)).expect("claims Input");
+    manager.unregister(m);
+
+    assert_eq!(pointer_ops(&mut manager), vec![left(true), left(false)]);
+}
+
+#[test]
+fn focus_lost_under_full_block_keeps_the_holders_buttons_until_the_lease_ends() {
+    let mut manager = manager();
+    let headless = headless_with_lease(&mut manager);
+    manager.send_pointer(headless, left(true)).expect("claims Input");
+    pointer_ops(&mut manager);
+
+    manager.route(&InputEvent::FocusLost, 0);
+    assert!(pointer_ops(&mut manager).is_empty());
+
+    manager.release(headless, Capability::Input);
+
+    assert_eq!(pointer_ops(&mut manager), vec![left(false)]);
+    assert!(events(&mut manager, headless).contains(&ModEvent::FakeKeysReleased));
+}
+
+#[test]
+fn focus_lost_without_full_block_releases_held_buttons() {
+    let mut manager = manager();
+    let m = toggles_with_lease(&mut manager);
+    manager.send_pointer(m, left(true)).expect("claims Input");
+
+    manager.route(&InputEvent::FocusLost, 0);
+
+    assert_eq!(pointer_ops(&mut manager), vec![left(true), left(false)]);
+}
+
+#[test]
+fn pointer_drops_are_counted_once() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    for _ in 0..=amm_core::services::input::FakePointer::CAPACITY {
+        manager.send_pointer(m, PointerOp::Wheel { steps: 1 }).expect("claims Input");
+    }
+
+    assert_eq!(manager.take_pointer_drops(), 1);
+    assert_eq!(manager.take_pointer_drops(), 0);
+}
+
+#[test]
+fn send_pointer_into_a_queue_full_of_button_ops_is_refused() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    for _ in 0..amm_core::services::input::FakePointer::CAPACITY / 2 {
+        manager.send_pointer(m, left(true)).expect("claims Input");
+        manager.send_pointer(m, left(false)).expect("claims Input");
+    }
+
+    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::PointerQueueFull));
+    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::PointerQueueFull));
+    assert_eq!(pointer_ops(&mut manager).len(), amm_core::services::input::FakePointer::CAPACITY);
+}
+
+fn button(down: bool) -> InputEvent {
+    InputEvent::PointerButton { button: 0, down, x: 1.0, y: 1.0 }
+}
+
+#[test]
+fn keys_and_buttons_the_game_saw_go_up_on_the_fake_path_when_the_block_starts() {
+    let mut manager = manager();
+    let headless = register(&mut manager, HEADLESS, "headless");
+    assert!(!manager.route(&key(KEY_W, true, NO_MODS), 0).consume_from_game);
+    assert!(!manager.route(&button(true), 0).consume_from_game);
+
+    manager.acquire(headless, Capability::Input, 0).expect("known");
+
+    assert_eq!(fake_ops(&mut manager), vec![fake_up(KEY_W)]);
+    assert_eq!(pointer_ops(&mut manager), vec![left(false)]);
+    let repeat = InputEvent::Key { vk: KEY_W, down: true, repeat: true, mods: NO_MODS };
+    assert!(manager.route(&repeat, 0).consume_from_game);
+    assert!(manager.route(&key(KEY_W, false, NO_MODS), 0).consume_from_game);
+    assert!(manager.route(&button(false), 0).consume_from_game);
+}
+
+#[test]
+fn a_key_a_mod_fakes_gets_no_game_up_when_the_block_starts_and_its_real_up_stays_kept() {
+    let mut manager = manager();
+    let m = toggles(&mut manager);
+    manager.send_key(m, KEY_W, true).expect("claims Input");
+    manager.route(&key(KEY_W, true, NO_MODS), 0);
+    fake_ops(&mut manager);
+    let headless = register(&mut manager, HEADLESS, "headless");
+
+    manager.acquire(headless, Capability::Input, 0).expect("known");
+
+    assert_eq!(fake_ops(&mut manager), vec![fake_up(KEY_W)]);
+    assert!(manager.route(&key(KEY_W, false, NO_MODS), 0).consume_from_game);
+}
+
+#[test]
+fn a_real_key_pressed_during_the_block_stays_from_the_game_after_the_lease_ends() {
+    let mut manager = manager();
+    let headless = headless_with_lease(&mut manager);
+    assert!(manager.route(&key(KEY_G, true, NO_MODS), 0).consume_from_game);
+
+    manager.release(headless, Capability::Input);
+
+    assert!(manager.route(&key(KEY_G, false, NO_MODS), 0).consume_from_game);
+    manager.acquire(headless, Capability::Input, 0).expect("known");
+    assert!(!manager.key_down(headless, KEY_G));
+    assert!(fake_ops(&mut manager).is_empty());
+}
+
+#[test]
+fn disabling_the_holder_after_focus_lost_runs_the_deferred_cleanup() {
+    let mut manager = manager();
+    let freecam = register(&mut manager, FREECAM, "freecam");
+    let headless = headless_with_lease(&mut manager);
+    manager.send_pointer(headless, left(true)).expect("claims Input");
+    manager.route(&key(KEY_G, true, NO_MODS), 0);
+    manager.route(&InputEvent::FocusLost, 0);
+    pointer_ops(&mut manager);
+
+    manager.set_enabled(headless, false);
+
+    assert_eq!(pointer_ops(&mut manager), vec![left(false)]);
+    manager.acquire(freecam, Capability::Input, 0).expect("known");
+    assert!(!manager.key_down(freecam, KEY_G));
+    assert!(!manager.route(&InputEvent::FocusLost, 0).consume_from_game);
+}
+
+#[test]
+fn unregistering_the_holder_after_focus_lost_runs_the_deferred_cleanup() {
+    let mut manager = manager();
+    let freecam = register(&mut manager, FREECAM, "freecam");
+    let headless = headless_with_lease(&mut manager);
+    manager.send_pointer(headless, left(true)).expect("claims Input");
+    manager.route(&key(KEY_G, true, NO_MODS), 0);
+    manager.route(&InputEvent::FocusLost, 0);
+    pointer_ops(&mut manager);
+
+    manager.unregister(headless);
+
+    assert_eq!(pointer_ops(&mut manager), vec![left(false)]);
+    manager.acquire(freecam, Capability::Input, 0).expect("known");
+    assert!(!manager.key_down(freecam, KEY_G));
+    assert!(!manager.route(&InputEvent::FocusLost, 0).consume_from_game);
+}
+
+#[test]
+fn the_end_of_a_block_with_a_kept_focus_loss_owes_the_game_one_focus_loss() {
+    let mut manager = manager();
+    let headless = headless_with_lease(&mut manager);
+    manager.route(&InputEvent::FocusLost, 0);
+    assert!(!manager.take_focus_loss_owed());
+
+    manager.release(headless, Capability::Input);
+
+    assert!(manager.take_focus_loss_owed());
+    assert!(!manager.take_focus_loss_owed());
+}
+
+#[test]
+fn the_end_of_a_block_without_a_kept_focus_loss_owes_nothing() {
+    let mut manager = manager();
+    let headless = headless_with_lease(&mut manager);
+
+    manager.release(headless, Capability::Input);
+
+    assert!(!manager.take_focus_loss_owed());
+}
+
+#[test]
+fn a_focus_loss_the_game_sees_after_the_block_clears_the_owed_one() {
+    let mut manager = manager();
+    let headless = headless_with_lease(&mut manager);
+    manager.route(&InputEvent::FocusLost, 0);
+    manager.release(headless, Capability::Input);
+
+    assert!(!manager.route(&InputEvent::FocusLost, 0).consume_from_game);
+
+    assert!(!manager.take_focus_loss_owed());
+}
+
+#[test]
+fn the_player_turn_is_blocked_while_a_full_block_holder_is_active() {
+    let mut manager = manager();
+    let headless = register(&mut manager, HEADLESS, "headless");
+    assert!(!manager.snapshot().blocks_player_turn);
+
+    manager.acquire(headless, Capability::Input, 0).expect("known");
+    assert!(manager.snapshot().blocks_player_turn);
+
+    manager.release(headless, Capability::Input);
+    assert!(!manager.snapshot().blocks_player_turn);
 }

@@ -24,4 +24,6 @@ pub enum ManagerError {
     InvalidArgument,
     #[error("the mod manager is shutting down, so it forces no render size")]
     RenderSizeClosed,
+    #[error("the fake pointer queue is full of button actions")]
+    PointerQueueFull,
 }

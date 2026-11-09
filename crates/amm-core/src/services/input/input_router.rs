@@ -56,11 +56,11 @@ impl InputRouter {
             },
             InputEvent::PointerButton { .. } => match ev.press() {
                 Some(press) => self.route_press(press, press.0 as u32, None, ctx, matcher),
-                None => self.route_pointer(ctx, true, true),
+                None => self.route_pointer(ctx, true, true, self.input_state(ctx)),
             },
             InputEvent::PointerDelta { .. } => self.route_motion(ctx),
-            InputEvent::Wheel { .. } => self.route_pointer(ctx, true, true),
-            InputEvent::PointerMove { .. } => self.route_pointer(ctx, false, true),
+            InputEvent::Wheel { .. } => self.route_pointer(ctx, true, true, self.input_state(ctx)),
+            InputEvent::PointerMove { .. } => self.route_pointer(ctx, false, true, self.input_state(ctx)),
             InputEvent::Char(_) => self.route_char(ctx),
         }
     }
@@ -88,6 +88,17 @@ impl InputRouter {
         for bind in self.bind_down.iter_mut() {
             if bind.is_some_and(|(owner, _)| owner == index) {
                 *bind = None;
+            }
+        }
+    }
+
+    /// Offers `release` every key and button the game saw go down and has not seen go up. Each one `release` takes
+    /// (it queued the game's up on the fake path) is kept from the game from now on, so its repeats and its real up
+    /// do not reach the game. A key `release` refuses stays with the game.
+    pub fn take_game_held(&mut self, mut release: impl FnMut(u32) -> bool) {
+        for slot in 0..InputEvent::VK_SLOTS {
+            if self.pressed[slot] && !self.swallowed[slot] && release(slot as u32) {
+                self.swallowed[slot] = true;
             }
         }
     }
@@ -175,16 +186,18 @@ impl InputRouter {
         if let Some(decision) = chord.and_then(|chord| self.keybind(slot, chord, ctx, matcher)) {
             return decision;
         }
-        let exclusive = ctx.arbiter.exclusive_holder(Capability::Input).is_some();
+        let (holders, exclusive, full_block) = self.input_state(ctx);
         if !exclusive && chord.is_some_and(|chord| chord.f3 || chord.key == Chord::F3) {
             return RouteDecision { consume_from_game: true, ..RouteDecision::default() };
         }
-        let holders = self.input_targets(ctx);
         if !holders.is_empty() {
             self.raw_down[slot] = holders;
-            let passes = holders.iter().all(|index| {
-                ctx.registry.get(index).is_some_and(|registered| registered.descriptor.input_passthrough.contains(&vk))
-            });
+            let passes = !full_block
+                && holders.iter().all(|index| {
+                    ctx.registry
+                        .get(index)
+                        .is_some_and(|registered| registered.descriptor.input_passthrough.contains(&vk))
+                });
             return RouteDecision { consume_from_game: !passes, raw_targets: holders, ..RouteDecision::default() };
         }
         let owner = ctx.pointer_owner.filter(|_| chord.is_none());
@@ -243,25 +256,38 @@ impl InputRouter {
         }
     }
 
-    // The active Input holders. With an exclusive holder, only that holder.
-    fn input_targets(&self, ctx: &RouteContext) -> ModMask {
+    /// Whether the active exclusive Input holder asks for every real input to be kept from the game.
+    pub fn full_block_active(&self, ctx: &RouteContext) -> bool {
+        self.input_state(ctx).2
+    }
+
+    // The active Input holders (with an exclusive holder, only that holder), whether an exclusive holder
+    // exists, and whether it is active with a `full_block` claim. One holder lookup serves all three.
+    fn input_state(&self, ctx: &RouteContext) -> (ModMask, bool, bool) {
         let holders = ctx.arbiter.holders(Capability::Input);
-        let targets = match ctx.arbiter.exclusive_holder(Capability::Input) {
-            Some(holder) if holders.contains(holder) => self.single(holder),
-            Some(_) => ModMask::default(),
-            None => holders,
+        let Some(holder) = ctx.arbiter.exclusive_holder(Capability::Input) else {
+            return (ModMask(holders.0 & self.slots.0), false, false);
         };
-        ModMask(targets.0 & self.slots.0)
+        if !holders.contains(holder) {
+            return (ModMask::default(), true, false);
+        }
+        let full_block = ctx.registry.get(holder).is_some_and(|registered| {
+            registered.descriptor.claims.iter().any(|claim| claim.capability == Capability::Input && claim.full_block)
+        });
+        (ModMask(self.single(holder).0 & self.slots.0), true, full_block)
     }
 
     // Pointer motion goes to every Input holder as a raw event. The game keeps it only when every holder
     // asks to pass it on.
     fn route_motion(&self, ctx: &RouteContext) -> RouteDecision {
-        let decision = self.route_pointer(ctx, true, false);
+        let state = self.input_state(ctx);
+        let full_block = state.2;
+        let decision = self.route_pointer(ctx, true, false, state);
         if decision.to_panel || decision.raw_targets.is_empty() {
             return decision;
         }
-        RouteDecision { consume_from_game: !Self::passes_motion(ctx, decision.raw_targets), ..decision }
+        let passes = !full_block && Self::passes_motion(ctx, decision.raw_targets);
+        RouteDecision { consume_from_game: !passes, ..decision }
     }
 
     fn passes_motion(ctx: &RouteContext, holders: ModMask) -> bool {
@@ -276,7 +302,13 @@ impl InputRouter {
         })
     }
 
-    fn route_pointer(&self, ctx: &RouteContext, raw: bool, to_owner: bool) -> RouteDecision {
+    fn route_pointer(
+        &self,
+        ctx: &RouteContext,
+        raw: bool,
+        to_owner: bool,
+        (targets, _, full_block): (ModMask, bool, bool),
+    ) -> RouteDecision {
         if ctx.panel_open {
             return Self::panel();
         }
@@ -285,7 +317,10 @@ impl InputRouter {
         if to_owner && ctx.over_menu_button {
             return RouteDecision { consume_from_game: raw, to_panel: true, ..RouteDecision::default() };
         }
-        let holders = if raw { self.input_targets(ctx) } else { ModMask::default() };
+        let holders = if raw { targets } else { ModMask::default() };
+        if full_block {
+            return RouteDecision { consume_from_game: true, raw_targets: holders, ..RouteDecision::default() };
+        }
         if !holders.is_empty() {
             return RouteDecision { consume_from_game: true, raw_targets: holders, ..RouteDecision::default() };
         }
@@ -307,6 +342,7 @@ impl InputRouter {
             Some(target) if !target.is_empty() => {
                 RouteDecision { consume_from_game: true, raw_targets: target, ..RouteDecision::default() }
             }
+            _ if self.full_block_active(ctx) => RouteDecision { consume_from_game: true, ..RouteDecision::default() },
             _ => RouteDecision::default(),
         }
     }
@@ -333,7 +369,8 @@ impl InputRouter {
         self.bind_down[slot] = None;
     }
 
-    fn clear(&mut self) {
+    /// Forgets every held key, as a focus loss does.
+    pub(crate) fn clear(&mut self) {
         self.pressed = [false; InputEvent::VK_SLOTS];
         self.swallowed = [false; InputEvent::VK_SLOTS];
         self.panel_down = [false; InputEvent::VK_SLOTS];

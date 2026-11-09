@@ -68,6 +68,7 @@ fn descriptor(id: &str, claims: Claims) -> Descriptor {
                 hide_vanilla_hud: false,
                 block_player_turn: false,
                 pass_pointer_motion: false,
+                full_block: false,
             })
             .collect(),
         keybinds: Vec::new(),

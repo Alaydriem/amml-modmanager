@@ -46,7 +46,9 @@ fn api_table_field_offsets_are_stable() {
     assert_eq!(offset_of!(AmmApi, capture_stream_give_back), 16 + 28 * 8);
     assert_eq!(offset_of!(AmmApi, watch_keys), 16 + 29 * 8);
     assert_eq!(offset_of!(AmmApi, send_key), 16 + 30 * 8);
-    assert_eq!(size_of::<AmmApi>(), 16 + 31 * 8);
+    assert_eq!(offset_of!(AmmApi, send_pointer), 16 + 31 * 8);
+    assert_eq!(offset_of!(AmmApi, panel_open), 16 + 32 * 8);
+    assert_eq!(size_of::<AmmApi>(), 16 + 33 * 8);
 }
 
 #[test]
@@ -211,7 +213,10 @@ fn sized_structs_start_with_size_and_base_fits() {
     assert_eq!(offset_of!(AmmCaptureStreamRequest, size), 0);
     assert_eq!(offset_of!(AmmCaptureStreamFrame, size), 0);
     assert_eq!(offset_of!(AmmRenderSizeState, size), 0);
-    assert_eq!((AmmApi::BASE_SIZE, AmmApi::blank().size as usize), (size_of::<AmmApi>(), size_of::<AmmApi>()));
+    assert_eq!(
+        (AmmApi::BASE_SIZE, AmmApi::blank().size as usize),
+        (offset_of!(AmmApi, capture_stream_give_back) + 8, size_of::<AmmApi>())
+    );
     assert_eq!(
         (AmmCallbacks::BASE_SIZE, AmmCallbacks::blank().size as usize),
         (size_of::<AmmCallbacks>(), size_of::<AmmCallbacks>())
@@ -389,7 +394,7 @@ fn capture_stream_frame_layout_is_stable() {
 /// grows `size_of`, so the `size` a side declares tells which fields it has.
 #[test]
 fn sized_structs_end_without_tail_padding() {
-    assert_eq!(offset_of!(AmmApi, send_key) + 8, size_of::<AmmApi>());
+    assert_eq!(offset_of!(AmmApi, panel_open) + 8, size_of::<AmmApi>());
     assert_eq!(offset_of!(AmmCallbacks, textures_lost) + 8, size_of::<AmmCallbacks>());
     assert_eq!(offset_of!(AmmFrameInput, reserved) + 6, size_of::<AmmFrameInput>());
     assert_eq!(offset_of!(AmmFrameOutput, reserved) + 4, size_of::<AmmFrameOutput>());

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use amm_abi::types::AmmStatus;
-use amm_core::structs::input::FakeKeyOp;
+use amm_core::structs::input::{FakeKeyOp, PointerOp};
 use amm_ffi::host::{amm_host_create, amm_host_destroy, amm_host_release_fake_keys, amm_host_tick};
 use amm_overlay::{PointerButton, ShutdownOutcome, UninstallOutcome};
 use amml_modmanager::ManagerPaths;
@@ -26,12 +26,15 @@ pub enum Call {
     HostKey { vk: u32, down: bool, repeat: bool },
     ReleaseFakeKeys,
     GameKey { controller: usize, vk: u32, down: bool, origin: i32 },
+    GameMouse { device: usize, action: u8, data: i8, x: i16, y: i16 },
     PointerDelta(i32, i32),
+    GameTurn { player: usize, pitch_millidegrees: i32, yaw_millidegrees: i32 },
     InstallHooks { latch_raised: bool },
     RemoveHooks(HookGroup),
     InstallOverlay,
     UninstallWndproc,
     WindowForeground,
+    ReplayFocusLoss,
     ShutdownOverlay,
     CloseRenderSize,
     PostRenderRestore(RenderRestore),
@@ -57,8 +60,11 @@ pub struct RecordingCalls {
     pub consumed_buttons: Mutex<Vec<PointerButton>>,
     pub focus_lost: AtomicBool,
     pub blocks_turn: AtomicBool,
+    pub blocks_gamepad: AtomicBool,
     pub game_pointer: Mutex<Option<(i16, i16)>>,
     pub foreground: AtomicBool,
+    // what the next `take_focus_loss_owed` answers; taken by it
+    pub focus_loss_owed: AtomicBool,
     pub local_player: AtomicUsize,
     pub world_active: AtomicBool,
     pub showing_menu: AtomicBool,
@@ -66,6 +72,7 @@ pub struct RecordingCalls {
     pub options: Mutex<Option<usize>>,
     pub player_hides_hud: AtomicBool,
     fake_keys: Mutex<Vec<FakeKeyOp>>,
+    fake_pointer: Mutex<Vec<PointerOp>>,
     now: AtomicU64,
     calls: Mutex<Vec<Call>>,
 }
@@ -95,8 +102,10 @@ impl RecordingCalls {
             consumed_buttons: Mutex::new(Vec::new()),
             focus_lost: AtomicBool::new(false),
             blocks_turn: AtomicBool::new(false),
+            blocks_gamepad: AtomicBool::new(false),
             game_pointer: Mutex::new(None),
             foreground: AtomicBool::new(true),
+            focus_loss_owed: AtomicBool::new(false),
             local_player: AtomicUsize::new(0),
             world_active: AtomicBool::new(false),
             showing_menu: AtomicBool::new(false),
@@ -104,6 +113,7 @@ impl RecordingCalls {
             options: Mutex::new(Some(Self::OPTIONS)),
             player_hides_hud: AtomicBool::new(false),
             fake_keys: Mutex::new(Vec::new()),
+            fake_pointer: Mutex::new(Vec::new()),
             now: AtomicU64::new(0),
             calls: Mutex::new(Vec::new()),
         }))
@@ -128,6 +138,16 @@ impl RecordingCalls {
     /// Fake key presses the host still holds.
     pub fn pending_fake_keys(&self) -> Vec<FakeKeyOp> {
         self.fake_keys.lock().unwrap().clone()
+    }
+
+    /// Fake pointer ops the host holds for the next `take_fake_pointer`.
+    pub fn queue_fake_pointer(&self, ops: &[PointerOp]) {
+        self.fake_pointer.lock().unwrap().extend_from_slice(ops);
+    }
+
+    /// Fake pointer ops the host still holds.
+    pub fn pending_fake_pointer(&self) -> Vec<PointerOp> {
+        self.fake_pointer.lock().unwrap().clone()
     }
 
     /// The calls since the last `take`, left in place.
@@ -209,6 +229,22 @@ impl GameCalls for RecordingCalls {
         self.record(Call::GameKey { controller, vk, down, origin });
     }
 
+    fn take_fake_pointer(&self, out: &mut Vec<PointerOp>) {
+        out.append(&mut self.fake_pointer.lock().unwrap());
+    }
+
+    fn game_mouse(&self, device: usize, action: u8, data: i8, x: i16, y: i16) {
+        self.record(Call::GameMouse { device, action, data, x, y });
+    }
+
+    fn game_turn(&self, player: usize, pitch: f32, yaw: f32) {
+        self.record(Call::GameTurn {
+            player,
+            pitch_millidegrees: (pitch * 1000.0).round() as i32,
+            yaw_millidegrees: (yaw * 1000.0).round() as i32,
+        });
+    }
+
     fn host_pointer_delta(&self, dx: f32, dy: f32) -> bool {
         self.record(Call::PointerDelta(dx as i32, dy as i32));
         self.consume_deltas.load(Ordering::SeqCst)
@@ -216,6 +252,10 @@ impl GameCalls for RecordingCalls {
 
     fn blocks_player_turn(&self) -> bool {
         self.blocks_turn.load(Ordering::SeqCst)
+    }
+
+    fn blocks_gamepad(&self) -> bool {
+        self.blocks_gamepad.load(Ordering::SeqCst)
     }
 
     fn modifiers(&self) -> u8 {
@@ -237,6 +277,14 @@ impl GameCalls for RecordingCalls {
     fn game_window_foreground(&self) -> bool {
         self.record(Call::WindowForeground);
         self.foreground.load(Ordering::SeqCst)
+    }
+
+    fn take_focus_loss_owed(&self) -> bool {
+        self.focus_loss_owed.swap(false, Ordering::SeqCst)
+    }
+
+    fn replay_focus_loss(&self) {
+        self.record(Call::ReplayFocusLoss);
     }
 
     fn install_hooks(&self) -> Result<(), SdkError> {

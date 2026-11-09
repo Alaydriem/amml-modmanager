@@ -70,9 +70,12 @@ impl ManagerLifecycle {
         // a game that stopped ticking is closing, and its ClientInstance and MinecraftGame may be gone
         let ticking = self.state.tick().ticked_within(calls.now_ms(), Self::RESTORE_TICK_WINDOW_MS);
         if ticking {
-            // held fake keys go up while the game still ticks, since the keyboard calls need its thread
+            // held fake keys and buttons go up while the game still ticks, since the keyboard and mouse calls need
+            // its thread
             calls.release_fake_keys();
             self.state.fake_keys().flush(calls);
+            // no look turn goes to the game here: the turn hook is already removed
+            self.state.fake_pointer().flush(calls, 0);
         }
         calls.remove_hooks(HookGroup::Tick);
         self.state.latch().raise();

@@ -36,10 +36,8 @@ impl InputSink for ManagerInputSink {
         !ModRuntime::is_disabled() && amm_host_char(codepoint).consume
     }
 
-    fn focus_lost(&self) {
-        if !ModRuntime::is_disabled() {
-            amm_host_focus_lost();
-        }
+    fn focus_lost(&self) -> bool {
+        !ModRuntime::is_disabled() && amm_host_focus_lost()
     }
 
     fn window_size(&self, minimised: bool, width: u32, height: u32) -> Option<(u32, u32)> {

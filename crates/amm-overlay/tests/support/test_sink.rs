@@ -32,6 +32,8 @@ pub struct TestSink {
     pub pointers: Mutex<Vec<PointerCall>>,
     pub chars: Mutex<Vec<u32>>,
     pub focus_lost_calls: AtomicU32,
+    // what `focus_lost` answers: true swallows the focus message
+    pub swallow_focus: AtomicBool,
     pub window_changed_calls: AtomicU32,
     // the size `window_size` gives; none passes the message unchanged
     pub window_size: Mutex<Option<(u32, u32)>>,
@@ -53,6 +55,7 @@ impl TestSink {
             pointers: Mutex::new(Vec::new()),
             chars: Mutex::new(Vec::new()),
             focus_lost_calls: AtomicU32::new(0),
+            swallow_focus: AtomicBool::new(false),
             window_changed_calls: AtomicU32::new(0),
             window_size: Mutex::new(None),
             window_sizes: Mutex::new(Vec::new()),
@@ -93,8 +96,9 @@ impl InputSink for TestSink {
         self.consume.load(Ordering::SeqCst)
     }
 
-    fn focus_lost(&self) {
+    fn focus_lost(&self) -> bool {
         self.focus_lost_calls.fetch_add(1, Ordering::SeqCst);
+        self.swallow_focus.load(Ordering::SeqCst)
     }
 
     fn window_size(&self, minimised: bool, width: u32, height: u32) -> Option<(u32, u32)> {

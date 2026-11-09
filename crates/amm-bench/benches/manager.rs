@@ -1,6 +1,7 @@
 use std::hint::black_box;
+use std::time::Duration;
 
-use amm_bench::fixtures::{BenchHost, ChordTable, EightMods};
+use amm_bench::fixtures::{BenchHost, ChordTable, EightMods, HolderRoute};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 const CLIENTS: usize = 4;
@@ -25,6 +26,23 @@ fn route_event(c: &mut Criterion) {
             black_box(mods.route_key(black_box(EightMods::VK_Q), down, 0))
         })
     });
+    group.finish();
+}
+
+fn route_holder(c: &mut Criterion) {
+    let mut group = c.benchmark_group("route_holder");
+    group.sample_size(400).measurement_time(Duration::from_secs(10));
+    for (name, full_block) in [("exclusive", false), ("full_block", true)] {
+        let mut holder = HolderRoute::new(full_block);
+        let mut down = true;
+        group.bench_function(format!("{name}_key"), |b| {
+            b.iter(|| {
+                down = !down;
+                black_box(holder.route_key(black_box(HolderRoute::VK_Q), down))
+            })
+        });
+        group.bench_function(format!("{name}_motion"), |b| b.iter(|| black_box(holder.route_motion())));
+    }
     group.finish();
 }
 
@@ -65,5 +83,5 @@ fn match_chord(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, route_event, frame_snapshot, merge_meshes, panel_closed, match_chord);
+criterion_group!(benches, route_event, route_holder, frame_snapshot, merge_meshes, panel_closed, match_chord);
 criterion_main!(benches);

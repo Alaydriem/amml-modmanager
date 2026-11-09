@@ -12,6 +12,8 @@ pub struct RawClaim {
     pub block_player_turn: bool,
     #[serde(default)]
     pub pass_pointer_motion: bool,
+    #[serde(default)]
+    pub full_block: bool,
 }
 
 impl RawClaim {
@@ -23,6 +25,7 @@ impl RawClaim {
             hide_vanilla_hud: self.hide_vanilla_hud,
             block_player_turn: self.block_player_turn,
             pass_pointer_motion: self.pass_pointer_motion,
+            full_block: self.full_block,
         }
     }
 }

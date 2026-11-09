@@ -40,6 +40,10 @@ pub enum DescriptorError {
     BlockTurnOnNonInputClaim,
     #[error("pass_pointer_motion is only valid on an Input claim")]
     PassMotionOnNonInputClaim,
+    #[error("full_block is only valid on an Input claim")]
+    FullBlockOnlyOnInput,
+    #[error("full_block needs an Exclusive Input claim")]
+    FullBlockNeedsExclusive,
     #[error("a RenderSize claim must be Exclusive: one mod forces the size at a time")]
     SharedRenderSize,
     #[error("{0} must be a whole number of at least 1")]

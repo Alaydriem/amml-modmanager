@@ -21,7 +21,7 @@ fn a_client_finds_the_table_of_the_dll_loaded_under_the_manager_name() {
     let get_api = unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, GetApi>(proc) };
     // SAFETY: amm_get_api takes a major version by value and returns null or the static table
     let table = unsafe { &*get_api(AMM_ABI_MAJOR) };
-    assert_eq!((table.abi_major, table.abi_minor), (2, 1));
+    assert_eq!((table.abi_major, table.abi_minor), (2, 3));
     assert_eq!(table.abi_minor, AMM_ABI_MINOR);
     // SAFETY: as above
     assert!(unsafe { get_api(AMM_ABI_MAJOR + 1) }.is_null());

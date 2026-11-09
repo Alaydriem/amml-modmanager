@@ -32,6 +32,7 @@ impl From<&ManagerError> for AmmStatus {
             ManagerError::RenderSizeOutOfRange => AmmStatus::InvalidArgument,
             ManagerError::RenderSizeClosed => AmmStatus::NotPermitted,
             ManagerError::InvalidArgument => AmmStatus::InvalidArgument,
+            ManagerError::PointerQueueFull => AmmStatus::QueueFull,
         }
     }
 }

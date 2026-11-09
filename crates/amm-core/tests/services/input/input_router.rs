@@ -13,6 +13,7 @@ use amm_core::structs::toast::ToastKind;
 const FREECAM: &str = include_str!("../../../fixtures/four_mods/freecam.hcl");
 const DEJAVU: &str = include_str!("../../../fixtures/four_mods/dejavu.hcl");
 const MINIMAP: &str = include_str!("../../../fixtures/four_mods/minimap.hcl");
+const HEADLESS: &str = include_str!("../../../fixtures/four_mods/headless.hcl");
 
 const NO_MODS: Modifiers = Modifiers { ctrl: false, shift: false, alt: false };
 const CTRL: Modifiers = Modifiers { ctrl: true, shift: false, alt: false };
@@ -140,6 +141,7 @@ fn input_mod(id: &str, mode: ClaimMode, pass_pointer_motion: bool, block_player_
             hide_vanilla_hud: false,
             block_player_turn,
             pass_pointer_motion,
+            full_block: false,
         }],
         keybinds: Vec::new(),
         input_passthrough: Vec::new(),
@@ -808,4 +810,117 @@ fn an_exclusive_input_holder_gets_f3_and_keys_held_with_it_raw() {
     }
     assert!(!f3_down.consume_from_game);
     assert!(g_down.consume_from_game);
+}
+
+fn headless_rig() -> (Rig, ModIndex) {
+    let (mut rig, ids) = Rig::new(vec![parse(FREECAM), parse(HEADLESS)]);
+    rig.acquire(ids[1], Capability::Input);
+    (rig, ids[1])
+}
+
+#[test]
+fn full_block_consumes_a_passthrough_key() {
+    let (mut rig, headless) = headless_rig();
+
+    let down = rig.route(key(KEY_W, true, NO_MODS));
+    let up = rig.route(key(KEY_W, false, NO_MODS));
+
+    assert!(down.consume_from_game);
+    assert_eq!(down.raw_targets, mask(&[headless]));
+    assert!(up.consume_from_game);
+}
+
+#[test]
+fn full_block_consumes_f3() {
+    let (mut rig, headless) = headless_rig();
+
+    let down = rig.route(key(VK_F3, true, NO_MODS));
+
+    assert!(down.consume_from_game);
+    assert_eq!(down.raw_targets, mask(&[headless]));
+}
+
+#[test]
+fn full_block_consumes_pointer_buttons_wheel_and_motion() {
+    let (mut rig, _) = headless_rig();
+    rig.over_game_viewport = true;
+
+    let events = [
+        InputEvent::PointerButton { button: 0, down: true, x: 1.0, y: 1.0 },
+        InputEvent::PointerButton { button: 0, down: false, x: 1.0, y: 1.0 },
+        InputEvent::Wheel { delta: 1.0 },
+        InputEvent::PointerDelta { dx: 1.0, dy: 1.0 },
+        InputEvent::PointerMove { x: 2.0, y: 2.0 },
+        InputEvent::Char(u32::from('a')),
+    ];
+    for event in events {
+        assert!(rig.route(event).consume_from_game, "{event:?}");
+    }
+}
+
+#[test]
+fn full_block_keeps_the_toggle_chord() {
+    let (mut rig, _) = headless_rig();
+
+    let decision = rig.route(key(KEY_M, true, CTRL_SHIFT));
+
+    assert!(decision.toggle_panel);
+}
+
+#[test]
+fn full_block_ends_with_the_lease() {
+    let (mut rig, headless) = headless_rig();
+    assert!(rig.route(key(KEY_W, true, NO_MODS)).consume_from_game);
+    rig.route(key(KEY_W, false, NO_MODS));
+
+    rig.arbiter.release(headless, Capability::Input, &mut rig.hub);
+
+    assert!(!rig.route(key(KEY_W, true, NO_MODS)).consume_from_game);
+    assert!(!rig.route(InputEvent::PointerDelta { dx: 1.0, dy: 1.0 }).consume_from_game);
+}
+
+#[test]
+fn panel_open_then_closed_resumes_the_block_only_with_the_lease() {
+    let (mut rig, headless) = headless_rig();
+
+    rig.panel_open = true;
+    let while_open = rig.route(key(KEY_W, true, NO_MODS));
+    rig.route(key(KEY_W, false, NO_MODS));
+    assert!(while_open.to_panel);
+    assert!(while_open.raw_targets.is_empty());
+
+    rig.panel_open = false;
+    let resumed = rig.route(key(KEY_W, true, NO_MODS));
+    rig.route(key(KEY_W, false, NO_MODS));
+    assert!(!resumed.to_panel);
+    assert!(resumed.consume_from_game);
+    assert_eq!(resumed.raw_targets, mask(&[headless]));
+
+    rig.arbiter.release(headless, Capability::Input, &mut rig.hub);
+    rig.panel_open = true;
+    rig.route(key(KEY_W, true, NO_MODS));
+    rig.route(key(KEY_W, false, NO_MODS));
+    rig.panel_open = false;
+    assert!(!rig.route(key(KEY_W, true, NO_MODS)).consume_from_game);
+}
+
+#[test]
+fn take_game_held_marks_the_keys_the_game_saw_that_it_took() {
+    let (mut rig, ids) = Rig::new(vec![parse(HEADLESS)]);
+    assert!(!rig.route(key(KEY_L, true, NO_MODS)).consume_from_game);
+    assert!(!rig.route(key(KEY_Z, true, NO_MODS)).consume_from_game);
+    let mut offered = Vec::new();
+
+    rig.router.take_game_held(|vk| {
+        offered.push(vk);
+        vk == KEY_Z
+    });
+
+    assert_eq!(offered, vec![KEY_L, KEY_Z]);
+    assert!(rig.router.swallowed(KEY_Z));
+    assert!(!rig.router.swallowed(KEY_L));
+    rig.acquire(ids[0], Capability::Input);
+    assert!(rig.route(repeat(KEY_Z, NO_MODS)).consume_from_game);
+    assert!(rig.route(key(KEY_Z, false, NO_MODS)).consume_from_game);
+    assert!(!rig.route(key(KEY_L, false, NO_MODS)).consume_from_game);
 }

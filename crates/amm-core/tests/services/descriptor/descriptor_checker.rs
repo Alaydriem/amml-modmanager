@@ -245,6 +245,40 @@ fn pass_pointer_motion_parses_on_an_input_claim() {
 }
 
 #[test]
+fn full_block_is_read_on_an_exclusive_input_claim() {
+    let text = SPEC_EXAMPLE.replace("claim \"Camera\"", "claim \"Input\"").replace(
+        "mode   = \"Shared\"",
+        "mode   = \"Exclusive\"
+  full_block = true",
+    );
+
+    let descriptor = checker().parse(&text).expect("parses");
+
+    let claim = descriptor.claims.iter().find(|claim| claim.capability == Capability::Input).expect("input claim");
+    assert!(claim.full_block);
+}
+
+#[test]
+fn full_block_on_another_capability_is_refused() {
+    let text = SPEC_EXAMPLE.replace(
+        "mode   = \"Shared\"",
+        "mode   = \"Exclusive\"
+  full_block = true",
+    );
+    assert_eq!(checker().parse(&text), Err(DescriptorError::FullBlockOnlyOnInput));
+}
+
+#[test]
+fn full_block_on_a_shared_input_claim_is_refused() {
+    let text = SPEC_EXAMPLE.replace("claim \"Camera\"", "claim \"Input\"").replace(
+        "mode   = \"Shared\"",
+        "mode   = \"Shared\"
+  full_block = true",
+    );
+    assert_eq!(checker().parse(&text), Err(DescriptorError::FullBlockNeedsExclusive));
+}
+
+#[test]
 fn pass_pointer_motion_on_another_claim_is_refused() {
     let text = SPEC_EXAMPLE.replace(
         "mode   = \"Shared\"",

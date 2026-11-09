@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use amm_abi::types::AmmStatus;
-use amm_core::structs::input::FakeKeyOp;
+use amm_core::structs::input::{FakeKeyOp, PointerOp};
 use amm_overlay::{PointerButton, ShutdownOutcome, UninstallOutcome};
 use amml_msvc::MsvcString;
 use amml_sdk::SdkError;
@@ -39,18 +39,33 @@ pub trait GameCalls: Sync {
     /// `amm_host_take_fake_keys` until the host has none left: appends the queued presses to `out`, oldest first.
     fn take_fake_keys(&self, out: &mut Vec<FakeKeyOp>);
 
-    /// `amm_host_release_fake_keys`: the host queues the release of every fake key a mod holds.
+    /// `amm_host_release_fake_keys`: the host queues the release of every fake key and mouse button a mod holds.
     fn release_fake_keys(&self);
 
     /// The game's own `onKeyDown` (`down`) or `onKeyUp` on the HIDController `controller`, past the manager's key
     /// detour. `origin` is the `InputOrigin` of a key down and is ignored for a key up.
     fn game_key(&self, controller: usize, vk: u32, down: bool, origin: i32);
 
+    /// `amm_host_take_fake_pointer` until the host has none left: appends the queued mouse actions to `out`, oldest
+    /// first.
+    fn take_fake_pointer(&self, out: &mut Vec<PointerOp>);
+
+    /// The game's own `MouseDevice::feed` on `device`, past the manager's feed detour: `action` is the
+    /// `actionButtonId`, `data` the `buttonData`, `x`, `y` the pointer, with no movement.
+    fn game_mouse(&self, device: usize, action: u8, data: i8, x: i16, y: i16);
+
+    /// The game's own `LocalPlayer::_applyTurnDelta` on `player`, past the manager's turn detour, with `pitch` and
+    /// `yaw` in degrees.
+    fn game_turn(&self, player: usize, pitch: f32, yaw: f32);
+
     /// `amm_host_pointer` with a raw mouse movement; true when the game must not see it.
     fn host_pointer_delta(&self, dx: f32, dy: f32) -> bool;
 
     /// `amm_host_blocks_player_turn`.
     fn blocks_player_turn(&self) -> bool;
+
+    /// `amm_host_blocks_gamepad`.
+    fn blocks_gamepad(&self) -> bool;
 
     /// The modifier mask of the keys held now: 1 Ctrl, 2 Shift, 4 Alt.
     fn modifiers(&self) -> u8;
@@ -68,6 +83,12 @@ pub trait GameCalls: Sync {
     /// The overlay's game window is the foreground window. Asked before the overlay shuts down, which forgets the
     /// window.
     fn game_window_foreground(&self) -> bool;
+
+    /// `amm_host_take_focus_loss_owed`.
+    fn take_focus_loss_owed(&self) -> bool;
+
+    /// `WndProcRouter::replay_focus_loss`: the game's window procedure sees the focus loss the manager kept from it.
+    fn replay_focus_loss(&self);
 
     /// Installs every game hook after reading the `GameSlot` entries. A missing required entry, or a hook the
     /// loader refuses, fails with nothing left installed; a missing optional entry turns off its own feature with

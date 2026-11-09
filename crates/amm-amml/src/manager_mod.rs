@@ -6,7 +6,7 @@ use windows::Win32::Foundation::HMODULE;
 use crate::dup_guard::DupGuard;
 use crate::errors::DupError;
 use crate::game_hooks::{
-    apply_turn_delta, client_update, feed, grab_mouse, key_down, key_up, level_exit, player_loaded,
+    apply_turn_delta, client_update, feed, gamepad_refresh, grab_mouse, key_down, key_up, level_exit, player_loaded,
 };
 use crate::paths::ManagerPaths;
 use crate::services::{LiveCalls, ManagerInputSink, ManagerOverlayHost, ManagerRuntime, ManagerState};
@@ -28,9 +28,10 @@ impl ManagerMod {
     pub const KEY_UP: &'static str = "HIDControllerGameCoreDesktop.onKeyUp";
     pub const GRAB_MOUSE: &'static str = "MinecraftGame.grabMouse";
     pub const TURN_DELTA: &'static str = "LocalPlayer.applyTurnDelta";
+    pub const GAMEPAD_REFRESH: &'static str = "GameControllerHandler_GameCore.refresh";
 
     /// Every game hook, in install order; the tick goes in last.
-    pub fn hooks() -> [HookSpec; 8] {
+    pub fn hooks() -> [HookSpec; 9] {
         [
             HookSpec {
                 entry: Self::PLAYER_LOADED,
@@ -71,6 +72,14 @@ impl ManagerMod {
                 group: HookGroup::Input,
                 required: true,
                 feature: "the manager",
+            },
+            HookSpec {
+                entry: Self::GAMEPAD_REFRESH,
+                detour: gamepad_refresh::detour as *const c_void,
+                original: gamepad_refresh::GUARD.original(),
+                group: HookGroup::Input,
+                required: false,
+                feature: "the gamepad block",
             },
             HookSpec {
                 entry: Self::GRAB_MOUSE,

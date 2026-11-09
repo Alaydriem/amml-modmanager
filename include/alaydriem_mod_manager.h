@@ -8,6 +8,36 @@
 #include <stdbool.h>
 
 /*
+ The `op` of `send_pointer` for the left button.
+ */
+#define AMM_POINTER_OP_LEFT 1
+
+/*
+ The `op` of `send_pointer` for the right button.
+ */
+#define AMM_POINTER_OP_RIGHT 2
+
+/*
+ The `op` of `send_pointer` for the middle button.
+ */
+#define AMM_POINTER_OP_MIDDLE 3
+
+/*
+ The `op` of `send_pointer` for the wheel.
+ */
+#define AMM_POINTER_OP_WHEEL 4
+
+/*
+ The `op` of `send_pointer` for a yaw turn.
+ */
+#define AMM_POINTER_OP_TURN_YAW 5
+
+/*
+ The `op` of `send_pointer` for a pitch turn.
+ */
+#define AMM_POINTER_OP_TURN_PITCH 6
+
+/*
  The ABI major version. A client and the manager must agree on it.
  */
 #define AMM_ABI_MAJOR 2
@@ -16,7 +46,7 @@
  The ABI minor version. It grows when functions are added at the end of the table or fields at the end of a
  sized struct.
  */
-#define AMM_ABI_MINOR 1
+#define AMM_ABI_MINOR 3
 
 /*
  The result code of a table function.
@@ -194,8 +224,9 @@ enum AmmEventKind
    */
   AMM_EVENT_KIND_LOCALE_CHANGED,
   /*
-   Since 2.1. The manager let go of the fake keys the mod held with `send_key`, because the panel opened, the game
-   window lost focus, the world was left or the mod was disabled. The mod drops its own record of them. No field.
+   Since 2.1. The manager let go of the fake keys the mod held with `send_key`, or (since 2.2) the mouse buttons
+   it held with `send_pointer`, because the panel opened, the game window lost focus, the world was left or the
+   mod was disabled. The mod drops its own record of them. No field.
    */
   AMM_EVENT_KIND_FAKE_KEYS_RELEASED,
 };
@@ -529,7 +560,8 @@ typedef struct AmmRenderSizeState {
  The function table returned by `amm_get_api`. New functions are only added at the end, with a higher `abi_minor`.
  A client checks `size` before it calls a function added after its own minor version. The functions from
  `register` to `capture_stream_give_back` are part of 2.0; a function after it came in the later minor version
- its doc names (`watch_keys` and `send_key` are 2.1).
+ its doc names (`watch_keys` and `send_key` are 2.1, `send_pointer` and `panel_open` are 2.2). Minor 2.3 adds no
+ function: it adds the look-turn ops 5 and 6 to `send_pointer`.
  A null slot means the function is absent.
 
  All text is UTF-8 as a pointer and a length.
@@ -831,6 +863,36 @@ typedef struct AmmApi {
    names no live registration is `UnknownHandle`.
    */
   AmmStatus (*send_key)(struct AmmHandle handle, uint32_t vk, uint8_t down);
+  /*
+   Since 2.2. Game thread. Sends a fake mouse action that the game sees as its own mouse. `op` 1
+   (`AMM_POINTER_OP_LEFT`) is the left button, 2 (`AMM_POINTER_OP_RIGHT`) the right button and 3
+   (`AMM_POINTER_OP_MIDDLE`) the middle button, each with `value` 1 to hold it down and 0 to let it go; `op` 4
+   (`AMM_POINTER_OP_WHEEL`) is the wheel, with `value` the signed number of notches to turn (positive away from the player), at
+   most 32 either way. Since 2.3, `op` 5 (`AMM_POINTER_OP_TURN_YAW`) and 6 (`AMM_POINTER_OP_TURN_PITCH`) turn the
+   player's look by `value` millidegrees on that axis, at most 360000 either way: the manager adds the turns of
+   one axis into one pending value and, once per game tick, makes one call of the game's own turn with the sum
+   in degrees, past its own block of the player's mouse turn, when the game has a local player. The sign of each
+   axis is the game's own. Any other `op`, a button `value`
+   other than 0 or 1, a wheel `value` past 32 either way or a turn `value` past 360000 either way is
+   `InvalidArgument`; a wheel or turn `value` of 0 is `Ok` and sends nothing. A manager of minor 2.2 or older
+   answers `InvalidArgument` to the turn ops. The rules of `send_key` apply: the
+   mod needs an `Input` claim in its descriptor, else `NotPermitted`; so is any call while the manager panel is
+   open, and a button down, a wheel turn or a look turn while another mod holds an active `Input` lease. A down for a button
+   the mod already holds, or an up for one it does not hold, is `Ok` and sends nothing. The manager lets go of
+   the buttons a mod holds on the same events as its fake keys, and the mod, if still registered, then gets
+   `FakeKeysReleased`. The manager queues at most 256 actions between game ticks: a full queue drops its oldest
+   wheel turn, never a button change, and with no wheel turn to drop the call is `QueueFull` and changes
+   nothing; a look turn uses no queue room. A look turn sent while the game has no local player is dropped. An action sent before the game has fed any real mouse event is dropped, not kept for later. A
+   handle that names no live registration is `UnknownHandle`.
+   */
+  AmmStatus (*send_pointer)(struct AmmHandle handle, uint32_t op, int32_t value);
+  /*
+   Since 2.2. Game thread. 1 while the manager panel is open, else 0. While it is open the manager refuses
+   `send_key` and `send_pointer` and has let go of every fake key and button; a mod that drives the game's input
+   reads this to stop as the person takes over, also when it held no key the panel could release. A handle that
+   names no live registration, or a call from inside a frame callback, where the host is busy, is 0.
+   */
+  uint8_t (*panel_open)(struct AmmHandle handle);
 } AmmApi;
 
 #endif  /* ALAYDRIEM_MOD_MANAGER_H */

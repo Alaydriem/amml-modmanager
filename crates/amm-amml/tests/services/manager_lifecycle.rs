@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering;
 
 use amm_abi::types::{AMM_ABI_MAJOR, AmmCursorShape, AmmStatus};
 use amm_client::link::{ApiTable, ManagerLink};
-use amm_core::structs::input::FakeKeyOp;
+use amm_core::structs::input::{FakeKeyOp, PointerButton, PointerOp};
 use amm_ffi::api::amm_api_for;
 use amm_ffi::services::HostCell;
 use amm_overlay::{ShutdownOutcome, UninstallOutcome};
@@ -114,6 +114,25 @@ fn disable_releases_and_flushes_fake_keys_before_removing_hooks() {
     let at = |wanted: Call| calls.iter().position(|call| *call == wanted).unwrap();
     let release = at(Call::ReleaseFakeKeys);
     let up = at(Call::GameKey { controller: 0x5000, vk: 0x57, down: false, origin: 1 });
+    assert!(release < up);
+    assert!(up < at(Call::RemoveHooks(HookGroup::Tick)));
+}
+
+#[test]
+fn disable_flushes_fake_buttons_before_removing_hooks() {
+    let setup = Setup::new(false);
+    setup.runtime.enable().unwrap();
+    setup.take_mouse_and_hud(5000);
+    setup.calls.set_now(5500);
+    setup.state.fake_pointer().note(0x5100, 1, 2);
+    setup.calls.queue_fake_pointer(&[PointerOp::Button { button: PointerButton::Left, down: false }]);
+
+    setup.runtime.disable();
+
+    let calls = setup.calls.take();
+    let at = |wanted: Call| calls.iter().position(|call| *call == wanted).unwrap();
+    let release = at(Call::ReleaseFakeKeys);
+    let up = at(Call::GameMouse { device: 0x5100, action: 1, data: 0, x: 1, y: 2 });
     assert!(release < up);
     assert!(up < at(Call::RemoveHooks(HookGroup::Tick)));
 }
