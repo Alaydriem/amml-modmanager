@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "26.63.2"
+version = "26.63.3"
 edition = "2024"
 rust-version = "1.98"
 authors = ["Charles R. Portwood II"]
@@ -46,10 +46,10 @@ windows = "0.62.2"
 retour = "0.3.1"
 object = { version = "0.40.0", default-features = false, features = ["read_core", "pe"] }
 # The UI toolkit, from the amml repository at release tag 26.60.0
-amml-ui = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.2" }
-amml-i18n = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.2" }
-amml-i18n-tool = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.2" }
-amml-ui-rules = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.2" }
+amml-ui = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.3" }
+amml-i18n = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.3" }
+amml-i18n-tool = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.3" }
+amml-ui-rules = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.3" }
 amm-core = { path = "crates/amm-core" }
 amm-abi = { path = "crates/amm-abi" }
 amm-store = { path = "crates/amm-store" }
@@ -58,9 +58,9 @@ amm-client = { path = "crates/amm-client" }
 amm-ffi = { path = "crates/amm-ffi" }
 amm-overlay = { path = "crates/amm-overlay" }
 # The AMML mod SDK and the MSVC layouts, from the amml repository at release tag 26.60.0
-amml-abi = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.2" }
-amml-sdk = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.2" }
-amml-msvc = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.2" }
+amml-abi = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.3" }
+amml-sdk = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.3" }
+amml-msvc = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.3" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
