@@ -201,13 +201,13 @@ dependencies = [
 
 [[package]]
 name = "amml-abi"
-version = "26.63.4"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.4#fbfce8e0a2a5e711000b846dac172e8eb970615c"
+version = "26.63.6"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.6#76eda9384e87404134c826ed6f8b46fa3b9f27c0"
 
 [[package]]
 name = "amml-i18n"
-version = "26.63.4"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.4#fbfce8e0a2a5e711000b846dac172e8eb970615c"
+version = "26.63.6"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.6#76eda9384e87404134c826ed6f8b46fa3b9f27c0"
 dependencies = [
  "curia",
  "icu_locale_core",
@@ -220,8 +220,8 @@ dependencies = [
 
 [[package]]
 name = "amml-i18n-tool"
-version = "26.63.4"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.4#fbfce8e0a2a5e711000b846dac172e8eb970615c"
+version = "26.63.6"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.6#76eda9384e87404134c826ed6f8b46fa3b9f27c0"
 dependencies = [
  "amml-i18n",
  "icu_locale_core",
@@ -233,16 +233,16 @@ dependencies = [
 
 [[package]]
 name = "amml-msvc"
-version = "26.63.4"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.4#fbfce8e0a2a5e711000b846dac172e8eb970615c"
+version = "26.63.6"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.6#76eda9384e87404134c826ed6f8b46fa3b9f27c0"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "amml-sdk"
-version = "26.63.4"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.4#fbfce8e0a2a5e711000b846dac172e8eb970615c"
+version = "26.63.6"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.6#76eda9384e87404134c826ed6f8b46fa3b9f27c0"
 dependencies = [
  "amml-abi",
  "thiserror 2.0.21",
@@ -250,8 +250,8 @@ dependencies = [
 
 [[package]]
 name = "amml-ui"
-version = "26.63.4"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.4#fbfce8e0a2a5e711000b846dac172e8eb970615c"
+version = "26.63.6"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.6#76eda9384e87404134c826ed6f8b46fa3b9f27c0"
 dependencies = [
  "amml-i18n",
  "curia",
@@ -260,8 +260,8 @@ dependencies = [
 
 [[package]]
 name = "amml-ui-rules"
-version = "26.63.4"
-source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.4#fbfce8e0a2a5e711000b846dac172e8eb970615c"
+version = "26.63.6"
+source = "git+https://github.com/Alaydriem/amml.git?tag=26.63.6#76eda9384e87404134c826ed6f8b46fa3b9f27c0"
 
 [[package]]
 name = "android-activity"
