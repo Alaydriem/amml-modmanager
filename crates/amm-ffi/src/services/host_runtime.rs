@@ -18,7 +18,7 @@ use amm_core::structs::event::ModEvent;
 use amm_core::structs::frame::{FrameInputData, LayerKind, UiEvent, UiEventKind};
 use amm_core::structs::icon::ModIcon;
 use amm_core::structs::input::GameViewport;
-use amm_core::structs::input::{FakeKeyOp, InputEvent, Modifiers, PointerOp, RouteDecision};
+use amm_core::structs::input::{FakeKeyOp, InputEvent, Modifiers, MoveIntent, PointerOp, RouteDecision};
 use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::manager::TextureGrant;
 use amm_core::structs::menu::MenuScreens;
@@ -454,6 +454,11 @@ impl HostRuntime {
         self.manager.send_key(index, vk, down).map_err(|error| AmmStatus::from(&error))
     }
 
+    /// See `ManagerService::set_key_feed_ready`.
+    pub fn set_key_feed_ready(&mut self, ready: bool) {
+        self.manager.set_key_feed_ready(ready);
+    }
+
     /// Moves up to `capacity` queued fake key presses, oldest first, to `write(position, op)` and returns how many.
     /// The rest stay in `fake_ops` for the next call.
     pub fn take_fake_keys(&mut self, capacity: usize, mut write: impl FnMut(usize, FakeKeyOp)) -> usize {
@@ -471,6 +476,11 @@ impl HostRuntime {
         self.manager.send_pointer(index, op).map_err(|error| AmmStatus::from(&error))
     }
 
+    /// See `ManagerService::set_pointer_feed_ready`.
+    pub fn set_pointer_feed_ready(&mut self, ready: bool) {
+        self.manager.set_pointer_feed_ready(ready);
+    }
+
     /// Moves up to `capacity` queued fake mouse actions, oldest first, to `write(position, op)` and returns how
     /// many. The rest stay in `fake_pointer_ops` for the next call.
     pub fn take_fake_pointer(&mut self, capacity: usize, mut write: impl FnMut(usize, PointerOp)) -> usize {
@@ -480,6 +490,24 @@ impl HostRuntime {
             write(position, op);
         }
         count
+    }
+
+    /// Holds or clears the move intent of `handle`. See `ManagerService::send_move`.
+    pub fn send_move(&mut self, handle: AmmHandle, intent: MoveIntent) -> Result<(), AmmStatus> {
+        let index = self.index(handle)?;
+        self.manager.send_move(index, intent).map_err(|error| AmmStatus::from(&error))
+    }
+
+    /// See `ManagerService::set_move_available`.
+    pub fn set_move_available(&mut self, available: bool) {
+        self.manager.set_move_available(available);
+    }
+
+    /// The tick saw whether the game has a local player in an active world; the answer is the held move intent,
+    /// all zero when none is held.
+    pub fn move_tick(&mut self, player_ready: bool) -> MoveIntent {
+        self.manager.set_player_ready(player_ready);
+        self.manager.move_intent()
     }
 
     pub fn set_setting(&mut self, handle: AmmHandle, path: &str, value_hcl: &str) -> Result<(), AmmStatus> {

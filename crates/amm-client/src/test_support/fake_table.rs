@@ -69,6 +69,7 @@ impl FakeTable {
             send_key: Some(Self::send_key),
             send_pointer: Some(Self::send_pointer),
             panel_open: Some(Self::panel_open),
+            send_move: Some(Self::send_move),
         }
     }
 
@@ -81,6 +82,7 @@ impl FakeTable {
             send_key: None,
             send_pointer: None,
             panel_open: None,
+            send_move: None,
             ..Self::api()
         }
     }
@@ -88,7 +90,13 @@ impl FakeTable {
     /// A table of ABI minor 1: it ends after `send_key`, and `send_pointer` and `panel_open` are null.
     pub fn api_minor_1() -> AmmApi {
         let size = std::mem::offset_of!(AmmApi, send_pointer) as u32;
-        AmmApi { size, abi_minor: 1, send_pointer: None, panel_open: None, ..Self::api() }
+        AmmApi { size, abi_minor: 1, send_pointer: None, panel_open: None, send_move: None, ..Self::api() }
+    }
+
+    /// A table of ABI minor 3: it ends after `panel_open`, and `send_move` is null.
+    pub fn api_minor_3() -> AmmApi {
+        let size = std::mem::offset_of!(AmmApi, send_move) as u32;
+        AmmApi { size, abi_minor: 3, send_move: None, ..Self::api() }
     }
 
     /// `api` leaked, so it lives for the rest of the process as the manager's table does.
@@ -553,6 +561,13 @@ impl FakeTable {
         Self::with(|state| {
             state.sent_pointer_calls.push((op, value));
             state.send_pointer_status
+        })
+    }
+
+    unsafe extern "C" fn send_move(_: AmmHandle, forward_milli: i32, left_milli: i32, flags: u32) -> AmmStatus {
+        Self::with(|state| {
+            state.sent_move_calls.push((forward_milli, left_milli, flags));
+            state.send_move_status
         })
     }
 

@@ -48,6 +48,11 @@ impl ManagerLifecycle {
             self.stop_host(calls, Self::KEPT_FROM_EARLIER);
             return Err(error);
         }
+        if let Some(device) = calls.mouse_device() {
+            self.state.fake_pointer().set_device(device);
+        }
+        let move_available = self.state.fake_move().set_layout(calls.move_layout());
+        calls.set_move_available(move_available);
         calls.install_overlay();
         Ok(())
     }
@@ -78,6 +83,7 @@ impl ManagerLifecycle {
             self.state.fake_pointer().flush(calls, 0);
         }
         calls.remove_hooks(HookGroup::Tick);
+        self.state.fake_move().stop();
         self.state.latch().raise();
         if ticking {
             let client = self.state.tick().client();

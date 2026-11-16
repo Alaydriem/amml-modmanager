@@ -4,6 +4,7 @@ pub mod host_fake_pointer;
 pub mod host_frame;
 pub mod host_frame_input;
 pub mod host_layer;
+pub mod host_move;
 pub mod host_pointer_kind;
 pub mod host_route;
 
@@ -16,5 +17,6 @@ pub use host_frame::{
 };
 pub use host_frame_input::AmmHostFrameInput;
 pub use host_layer::AmmHostLayer;
+pub use host_move::AmmHostMove;
 pub use host_pointer_kind::AmmHostPointerKind;
 pub use host_route::AmmHostRoute;

@@ -90,6 +90,9 @@ pub struct FakeState {
     // the (op, value) of each `send_pointer` call, and the status it answers with
     pub sent_pointer_calls: Vec<(u32, i32)>,
     pub send_pointer_status: AmmStatus,
+    // the (forward_milli, left_milli, flags) of each `send_move` call, and the status it answers with
+    pub sent_move_calls: Vec<(i32, i32, u32)>,
+    pub send_move_status: AmmStatus,
 }
 
 impl FakeState {
@@ -146,6 +149,8 @@ impl FakeState {
             send_key_status: AmmStatus::Ok,
             sent_pointer_calls: Vec::new(),
             send_pointer_status: AmmStatus::Ok,
+            sent_move_calls: Vec::new(),
+            send_move_status: AmmStatus::Ok,
         }
     }
 
@@ -162,6 +167,11 @@ impl FakeState {
     /// The `(op, value)` of each `send_pointer` call, in order.
     pub fn sent_pointer(&self) -> Vec<(u32, i32)> {
         self.sent_pointer_calls.clone()
+    }
+
+    /// The `(forward_milli, left_milli, flags)` of each `send_move` call, in order.
+    pub fn sent_moves(&self) -> Vec<(i32, i32, u32)> {
+        self.sent_move_calls.clone()
     }
 
     /// True when a mod registered and gave neither a frame nor a textures-lost callback.

@@ -13,7 +13,7 @@ use crate::services::descriptor::DescriptorChecker;
 use crate::services::event::EventHub;
 use crate::services::icon::IconBook;
 use crate::services::input::{
-    ChordMatcher, CursorSet, FakeKeys, FakePointer, GameViewportBook, InputRouter, KeyState, KeyWatch,
+    ChordMatcher, CursorSet, FakeKeys, FakeMove, FakePointer, GameViewportBook, InputRouter, KeyState, KeyWatch,
 };
 use crate::services::lease::LeaseArbiter;
 use crate::services::menu::MenuEntries;
@@ -30,7 +30,7 @@ use crate::structs::event::{KeybindPhase, ModEvent};
 use crate::structs::frame::{FrameReplyData, LayerKind, MenuScreen};
 use crate::structs::icon::{IconEntry, ModIcon};
 use crate::structs::input::{
-    FakeKeyOp, GameViewport, InputEvent, PointerButton, PointerOp, RouteContext, RouteDecision,
+    FakeKeyOp, GameViewport, InputEvent, MoveIntent, PointerButton, PointerOp, RouteContext, RouteDecision,
 };
 use crate::structs::lease::AcquireOutcome;
 use crate::structs::manager::{ManagedMod, TextureGrant};
@@ -71,6 +71,22 @@ pub struct ManagerService {
     key_state: KeyState,
     fake_keys: FakeKeys,
     fake_pointer: FakePointer,
+    fake_move: FakeMove,
+    /// Every move entry resolved and the move hook is in, so a move intent reaches the game.
+    move_available: bool,
+    /// The game has a local player in an active world, as the last tick saw it.
+    player_ready: bool,
+    /// The game feed knows the keyboard controller, so a fake key reaches the game. Each tick sets it.
+    key_feed_ready: bool,
+    /// A down was refused for no keyboard controller, and the feed has not been ready since: the line is written.
+    no_key_feed_logged: bool,
+    /// A down was refused for a full key queue, and no down has gone in since: the line is written.
+    key_queue_full_logged: bool,
+    /// The game feed knows the mouse device, so a fake button or wheel turn reaches the game. Each tick sets it.
+    pointer_feed_ready: bool,
+    /// A button down or wheel turn was refused for no mouse device, and the feed has not been ready since: the line
+    /// is written.
+    no_pointer_feed_logged: bool,
     key_watch: KeyWatch,
     /// The mods that held an active `Input` lease at the last publish.
     input_holders: ModMask,
@@ -103,6 +119,14 @@ pub struct ManagerService {
 impl ManagerService {
     /// How long the save status says "Saved" after a write goes out.
     pub const SAVED_SHOW_MS: u64 = SaveQueue::SAVED_SHOW_MS;
+    /// The warning when a fake key down is refused because the game feed has no keyboard controller yet. Written
+    /// once until the feed is ready.
+    pub const NO_KEY_FEED_LINE: &'static str = "fake key refused, the game feed has no keyboard controller yet";
+    /// The warning when a fake key down is refused because the key queue is full. Written once until a down goes in.
+    pub const KEY_QUEUE_FULL_LINE: &'static str = "fake key refused, the key queue is full";
+    /// The warning when a fake button down or wheel turn is refused because the game feed has no mouse device yet.
+    /// Written once until the feed is ready.
+    pub const NO_POINTER_FEED_LINE: &'static str = "fake mouse action refused, the game feed has no mouse device yet";
 
     /// `config_file` is the path and document of the manager's own `config.hcl`. With it, a change of an enabled
     /// flag or a resolution is written back there through the merge window; without it the change stays in memory.
@@ -127,6 +151,14 @@ impl ManagerService {
             key_state: KeyState::new(),
             fake_keys: FakeKeys::new(),
             fake_pointer: FakePointer::new(),
+            fake_move: FakeMove::new(),
+            move_available: false,
+            player_ready: false,
+            key_feed_ready: false,
+            no_key_feed_logged: false,
+            key_queue_full_logged: false,
+            pointer_feed_ready: false,
+            no_pointer_feed_logged: false,
             key_watch: KeyWatch::new(),
             input_holders: ModMask::default(),
             full_block_holder: None,
@@ -456,11 +488,12 @@ impl ManagerService {
         RouteDecision { consume_from_game: true, ..RouteDecision::default() }
     }
 
-    /// Lets go of the fake keys and buttons of every mod except `keep`. Each mod that lost one gets
+    /// Lets go of the fake keys, buttons and move intent of every mod except `keep`. Each mod that lost one gets
     /// `FakeKeysReleased`. Every up is queued: the window has lost focus, so no real key-up will reach the game.
     fn release_fake_except(&mut self, keep: ModIndex) {
         let mut lost = self.fake_keys.release_all_except(keep);
         lost.0 |= self.fake_pointer.release_all_except(keep).0;
+        lost.0 |= self.fake_move.clear_except(keep).0;
         for index in lost.iter() {
             self.hub.push(index, ModEvent::FakeKeysReleased);
         }
@@ -787,12 +820,14 @@ impl ManagerService {
         }
     }
 
-    /// The world was left: every fake key and button is released.
+    /// The world was left: every fake key and button and the move intent are released, and there is no local player
+    /// until a tick sees one again.
     pub fn world_left(&mut self) {
+        self.player_ready = false;
         self.release_fake_keys();
     }
 
-    /// Lets go of every fake key and button. Each mod that lost one gets `FakeKeysReleased`.
+    /// Lets go of every fake key and button and the move intent. Each mod that lost one gets `FakeKeysReleased`.
     pub fn release_fake_keys(&mut self) {
         self.release_fake_all();
     }
@@ -811,8 +846,10 @@ impl ManagerService {
 
     /// Holds a key of the game down (`down`) or lets it go with a fake press. The mod needs an `Input` claim, else
     /// `NotPermitted`; so is a call while the panel is open, and a down while any other mod holds an active `Input`
-    /// lease. A code of 256
-    /// or more is `InvalidArgument`. A down for a key the mod holds, or an up for one it does not, sends nothing.
+    /// lease. A code of 256 or more is `InvalidArgument`. A down while the game feed has no keyboard controller is
+    /// `NotReady`, and a down that finds `FakeKeys::MAX_OPS` presses queued is `KeyQueueFull`; each writes one
+    /// warning per episode. An up is never refused for these: with no controller no down went in, and a release
+    /// always has room. A down for a key the mod holds, or an up for one it does not, sends nothing.
     /// An up while the real key is down only drops the hold: the real key-up lets the game see the key go up.
     pub fn send_key(&mut self, index: ModIndex, vk: u32, down: bool) -> Result<(), ManagerError> {
         self.require_input_claim(index)?;
@@ -825,7 +862,21 @@ impl ManagerService {
             return Err(ManagerError::NotPermitted);
         }
         if down {
-            self.fake_keys.hold(index, vk);
+            if !self.key_feed_ready {
+                if !self.no_key_feed_logged {
+                    self.no_key_feed_logged = true;
+                    curia::warn!("fake key refused, the game feed has no keyboard controller yet", { vk: vk });
+                }
+                return Err(ManagerError::NotReady);
+            }
+            if !self.fake_keys.hold(index, vk) && !self.fake_keys.holds(index, vk) {
+                if !self.key_queue_full_logged {
+                    self.key_queue_full_logged = true;
+                    curia::warn!("fake key refused, the key queue is full", { vk: vk, queued: self.fake_keys.pending() });
+                }
+                return Err(ManagerError::KeyQueueFull);
+            }
+            self.key_queue_full_logged = false;
         } else {
             let mark = self.fake_keys.pending();
             self.fake_keys.release(index, vk);
@@ -846,8 +897,10 @@ impl ManagerService {
     /// lease. A wheel turn of more than `FakePointer::MAX_WHEEL_STEPS` notches either way, or a look turn of more
     /// than `FakePointer::MAX_TURN_MILLIDEGREES` either way, is `InvalidArgument`; one of 0 sends nothing. Look
     /// turns of one axis add into one pending value, so a turn never meets a full queue. A
-    /// down for a button the mod holds, or an up for one it does not, sends nothing. A call while the queue is full
-    /// of button actions is `PointerQueueFull`, and the button state stays as it was.
+    /// down for a button the mod holds, or an up for one it does not, sends nothing. A button down or a wheel turn
+    /// while the game feed has no mouse device is `NotReady`, with one warning per episode; a button up and a look
+    /// turn are never refused for it. A call while the queue is full of button actions is `PointerQueueFull`, and
+    /// the button state stays as it was.
     pub fn send_pointer(&mut self, index: ModIndex, op: PointerOp) -> Result<(), ManagerError> {
         self.require_input_claim(index)?;
         if let PointerOp::Wheel { steps } = op
@@ -865,6 +918,17 @@ impl ManagerService {
         others.remove(index);
         if self.panel.is_open() || (presses && !others.is_empty()) {
             return Err(ManagerError::NotPermitted);
+        }
+        let needs_device = matches!(op, PointerOp::Button { down: true, .. })
+            || matches!(op, PointerOp::Wheel { steps } if steps != 0);
+        if needs_device && !self.pointer_feed_ready {
+            if !self.no_pointer_feed_logged {
+                self.no_pointer_feed_logged = true;
+                curia::warn!("fake mouse action refused, the game feed has no mouse device yet", {
+                    wheel: matches!(op, PointerOp::Wheel { .. }),
+                });
+            }
+            return Err(ManagerError::NotReady);
         }
         if !matches!(op, PointerOp::Turn { .. }) && !self.fake_pointer.has_room() {
             return Err(ManagerError::PointerQueueFull);
@@ -896,6 +960,70 @@ impl ManagerService {
     /// How many fake mouse actions a full queue evicted or refused since the last call.
     pub fn take_pointer_drops(&mut self) -> u64 {
         self.fake_pointer.take_dropped()
+    }
+
+    /// Holds a movement of the local player until the mod sends another one or the manager clears it. The
+    /// all-zero intent is the clear: it is always `Ok` and sends no event. An axis outside -1.0 to 1.0 is
+    /// `InvalidArgument`. Any other intent is `Unsupported` while the move entries are missing, `NotPermitted`
+    /// unless the mod holds an active `Input` lease and the panel is closed, and `NotReady` while the game has no
+    /// local player in a world. A mod that sets an intent replaces the intent of another mod, which gets
+    /// `FakeKeysReleased`. The manager clears the intent, with `FakeKeysReleased` to its owner, on every path that
+    /// lets go of fake keys, and when the owner's `Input` lease ends.
+    pub fn send_move(&mut self, index: ModIndex, intent: MoveIntent) -> Result<(), ManagerError> {
+        self.registry.get(index).ok_or(ManagerError::UnknownMod)?;
+        if !intent.in_range() {
+            return Err(ManagerError::InvalidArgument);
+        }
+        if intent.is_zero() {
+            self.fake_move.set(index, intent);
+            return Ok(());
+        }
+        if !self.move_available {
+            return Err(ManagerError::Unsupported);
+        }
+        if self.panel.is_open() || !self.arbiter.holds(index, Capability::Input) {
+            return Err(ManagerError::NotPermitted);
+        }
+        if !self.player_ready {
+            return Err(ManagerError::NotReady);
+        }
+        if let Some(replaced) = self.fake_move.set(index, intent) {
+            self.hub.push(replaced, ModEvent::FakeKeysReleased);
+        }
+        Ok(())
+    }
+
+    /// The held move intent the game must see; all zero when no mod holds one.
+    pub fn move_intent(&self) -> MoveIntent {
+        self.fake_move.current()
+    }
+
+    /// Whether every move entry resolved and the move hook went in. Set at enable.
+    pub fn set_move_available(&mut self, available: bool) {
+        self.move_available = available;
+    }
+
+    /// Whether the game feed knows the keyboard controller. Each tick sets it; a ready feed ends the episode of the
+    /// no-controller warning.
+    pub fn set_key_feed_ready(&mut self, ready: bool) {
+        self.key_feed_ready = ready;
+        if ready {
+            self.no_key_feed_logged = false;
+        }
+    }
+
+    /// Whether the game feed knows the mouse device. Each tick sets it; a ready feed ends the episode of the
+    /// no-device warning.
+    pub fn set_pointer_feed_ready(&mut self, ready: bool) {
+        self.pointer_feed_ready = ready;
+        if ready {
+            self.no_pointer_feed_logged = false;
+        }
+    }
+
+    /// Whether the game has a local player in an active world. Each tick sets it.
+    pub fn set_player_ready(&mut self, ready: bool) {
+        self.player_ready = ready;
     }
 
     /// Sends `WorldReloadApply` to each mod with a saved `WorldReload` change since the last load.
@@ -1065,6 +1193,7 @@ impl ManagerService {
     fn publish(&mut self) {
         self.track_full_block();
         self.release_fake_for_new_input_holders();
+        self.release_unleased_move();
         self.captures.cancel_unleased(&self.arbiter, &mut self.hub);
         self.render_size.drop_unleased(&self.arbiter);
         for registered in self.registry.iter() {
@@ -1227,6 +1356,18 @@ impl ManagerService {
         }
     }
 
+    // The owner of the move intent no longer holds an active `Input` lease: the intent is cleared and the owner gets
+    // `FakeKeysReleased`.
+    fn release_unleased_move(&mut self) {
+        let Some(owner) = self.fake_move.owner() else {
+            return;
+        };
+        if !self.arbiter.holds(owner, Capability::Input) {
+            let lost = self.fake_move.clear_mod(owner);
+            self.finish_fake_release(self.fake_keys.pending(), lost);
+        }
+    }
+
     fn require_input_claim(&self, index: ModIndex) -> Result<(), ManagerError> {
         let registered = self.registry.get(index).ok_or(ManagerError::UnknownMod)?;
         if registered.descriptor.claims.iter().any(|claim| claim.capability == Capability::Input) {
@@ -1236,12 +1377,13 @@ impl ManagerService {
         }
     }
 
-    // Lets go of every fake key and button. Each mod that lost one gets `FakeKeysReleased`. A key whose real key
-    // is down gets no up, because the real key-up reaches the game.
+    // Lets go of every fake key and button and the move intent. Each mod that lost one gets `FakeKeysReleased`. A
+    // key whose real key is down gets no up, because the real key-up reaches the game.
     fn release_fake_all(&mut self) {
         let mark = self.fake_keys.pending();
         let mut lost = self.fake_keys.release_all();
         lost.0 |= self.fake_pointer.release_all().0;
+        lost.0 |= self.fake_move.clear_all().0;
         self.finish_fake_release(mark, lost);
     }
 
@@ -1249,6 +1391,7 @@ impl ManagerService {
         let mark = self.fake_keys.pending();
         let mut lost = self.fake_keys.release_mod(index);
         lost.0 |= self.fake_pointer.release_mod(index).0;
+        lost.0 |= self.fake_move.clear_mod(index).0;
         self.finish_fake_release(mark, lost);
     }
 

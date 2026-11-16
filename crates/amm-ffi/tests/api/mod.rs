@@ -5,5 +5,6 @@ mod input_query;
 mod key_output;
 mod locale;
 mod menu;
+mod move_output;
 mod picture;
 mod pointer_output;

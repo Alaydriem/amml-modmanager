@@ -6,10 +6,11 @@ use windows::Win32::Foundation::HMODULE;
 use crate::dup_guard::DupGuard;
 use crate::errors::DupError;
 use crate::game_hooks::{
-    apply_turn_delta, client_update, feed, gamepad_refresh, grab_mouse, key_down, key_up, level_exit, player_loaded,
+    apply_turn_delta, client_update, controller_update, extract_raw_hid_input, feed, gamepad_refresh, grab_mouse,
+    key_down, key_up, level_exit, player_loaded,
 };
 use crate::paths::ManagerPaths;
-use crate::services::{LiveCalls, ManagerInputSink, ManagerOverlayHost, ManagerRuntime, ManagerState};
+use crate::services::{LiveCalls, ManagerInputSink, ManagerOverlayHost, ManagerRuntime, ManagerState, MoveLayoutSlots};
 use crate::types::{HookGroup, HookSpec};
 
 /// The AMML entry point. Load checks that this copy is the module mods find and records the folders; it starts no
@@ -26,12 +27,13 @@ impl ManagerMod {
     pub const MOUSE_FEED: &'static str = "MouseDevice.feed";
     pub const KEY_DOWN: &'static str = "HIDControllerGameCoreDesktop.onKeyDown";
     pub const KEY_UP: &'static str = "HIDControllerGameCoreDesktop.onKeyUp";
+    pub const CONTROLLER_UPDATE: &'static str = "HIDControllerGameCoreDesktop.update";
     pub const GRAB_MOUSE: &'static str = "MinecraftGame.grabMouse";
     pub const TURN_DELTA: &'static str = "LocalPlayer.applyTurnDelta";
     pub const GAMEPAD_REFRESH: &'static str = "GameControllerHandler_GameCore.refresh";
 
     /// Every game hook, in install order; the tick goes in last.
-    pub fn hooks() -> [HookSpec; 9] {
+    pub fn hooks() -> [HookSpec; 11] {
         [
             HookSpec {
                 entry: Self::PLAYER_LOADED,
@@ -74,12 +76,28 @@ impl ManagerMod {
                 feature: "the manager",
             },
             HookSpec {
+                entry: Self::CONTROLLER_UPDATE,
+                detour: controller_update::detour as *const c_void,
+                original: controller_update::GUARD.original(),
+                group: HookGroup::Input,
+                required: false,
+                feature: "fake keys before the first real key press",
+            },
+            HookSpec {
                 entry: Self::GAMEPAD_REFRESH,
                 detour: gamepad_refresh::detour as *const c_void,
                 original: gamepad_refresh::GUARD.original(),
                 group: HookGroup::Input,
                 required: false,
                 feature: "the gamepad block",
+            },
+            HookSpec {
+                entry: MoveLayoutSlots::HOOK,
+                detour: extract_raw_hid_input::detour as *const c_void,
+                original: extract_raw_hid_input::GUARD.original(),
+                group: HookGroup::Input,
+                required: false,
+                feature: "the move command",
             },
             HookSpec {
                 entry: Self::GRAB_MOUSE,

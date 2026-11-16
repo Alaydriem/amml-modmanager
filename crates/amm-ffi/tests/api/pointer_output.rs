@@ -19,9 +19,14 @@ fn input_mod(host: &TestHost, id: &str) -> TestClient {
     TestClient::register(host, &descriptor, TestMesh::triangle())
 }
 
-fn take(out: &mut [AmmHostFakePointer]) -> usize {
+// the tick tells the host whether the game feed knows the mouse device
+fn take_with(feed_ready: bool, out: &mut [AmmHostFakePointer]) -> usize {
     // SAFETY: out is a writable slice with room for out.len() entries
-    unsafe { amm_host_take_fake_pointer(out.as_mut_ptr(), out.len()) }
+    unsafe { amm_host_take_fake_pointer(feed_ready, out.as_mut_ptr(), out.len()) }
+}
+
+fn take(out: &mut [AmmHostFakePointer]) -> usize {
+    take_with(true, out)
 }
 
 #[test]
@@ -61,7 +66,7 @@ fn take_fake_pointer_drains_in_order_and_keeps_the_rest() {
     assert_eq!(take(&mut one), 1);
     assert_eq!(one[0], AmmHostFakePointer { op: WHEEL, value: -2 });
     // SAFETY: a null pointer with a capacity of 0 writes nothing
-    assert_eq!(unsafe { amm_host_take_fake_pointer(std::ptr::null_mut(), 0) }, 0);
+    assert_eq!(unsafe { amm_host_take_fake_pointer(true, std::ptr::null_mut(), 0) }, 0);
     assert_eq!(take(&mut one), 0);
 }
 
@@ -80,4 +85,27 @@ fn turns_reach_the_host_as_one_pending_value_per_axis() {
     assert_eq!(drain[0], AmmHostFakePointer { op: TURN_PITCH, value: -250 });
     assert_eq!(drain[1], AmmHostFakePointer { op: TURN_YAW, value: 2000 });
     assert_eq!(take(&mut drain), 0);
+}
+
+#[test]
+fn send_pointer_before_the_feed_has_a_mouse_device_is_not_ready() {
+    let host = TestHost::new();
+    let client = input_mod(&host, "pointer-early");
+    let mut drain = [AmmHostFakePointer { op: 0, value: 0 }; 8];
+
+    let early = send_pointer(client.handle(), LEFT, 1);
+    let wheel = send_pointer(client.handle(), WHEEL, 1);
+    let turn = send_pointer(client.handle(), TURN_YAW, 700);
+    let taken = take_with(false, &mut drain);
+    let still = send_pointer(client.handle(), LEFT, 1);
+    take_with(true, &mut drain);
+    let ready = send_pointer(client.handle(), LEFT, 1);
+
+    assert_eq!((early, wheel, turn), (AmmStatus::NotReady, AmmStatus::NotReady, AmmStatus::Ok));
+    assert_eq!(taken, 1);
+    assert_eq!(drain[0], AmmHostFakePointer { op: TURN_YAW, value: 700 });
+    assert_eq!(still, AmmStatus::NotReady);
+    assert_eq!(ready, AmmStatus::Ok);
+    assert_eq!(take(&mut drain), 1);
+    assert_eq!(drain[0], AmmHostFakePointer { op: LEFT, value: 1 });
 }

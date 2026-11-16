@@ -2,7 +2,8 @@ use std::sync::atomic::Ordering;
 
 use amm_abi::types::{AMM_ABI_MAJOR, AmmCursorShape, AmmStatus};
 use amm_client::link::{ApiTable, ManagerLink};
-use amm_core::structs::input::{FakeKeyOp, PointerButton, PointerOp};
+use amm_core::structs::descriptor::Capability;
+use amm_core::structs::input::{FakeKeyOp, MoveIntent, MoveLayout, PointerButton, PointerOp};
 use amm_ffi::api::amm_api_for;
 use amm_ffi::services::HostCell;
 use amm_overlay::{ShutdownOutcome, UninstallOutcome};
@@ -64,9 +65,83 @@ fn enable_starts_the_host_before_any_hook() {
             Call::CreateHost,
             Call::SetConsole(true),
             Call::InstallHooks { latch_raised: false },
+            Call::SetMoveAvailable(false),
             Call::InstallOverlay
         ]
     );
+}
+
+fn move_layout() -> MoveLayout {
+    MoveLayout {
+        input_state: 0,
+        raw_move: 0x10,
+        analog: 4,
+        sneak_mask: 0x40001,
+        jump_mask: 0x80,
+        sprint_bit: 8,
+        up_bit: 13,
+        down_bit: 14,
+        left_bit: 15,
+        right_bit: 16,
+    }
+}
+
+const MOVER_DESCRIPTOR: &str = "namespace = \"test\"\nname = \"test-mover\"\ndisplay_name = \"Test mover\"\nversion = \"0.1.0\"\nauthor = \"A\"\nconfig_path = \"config.hcl\"\nclaim \"Input\" {\n  mode = \"Shared\"\n  reason = \"r\"\n}\n";
+
+#[test]
+fn enable_tells_the_host_the_move_command_is_available_once_the_move_entries_resolved() {
+    let setup = Setup::new(false);
+    *setup.calls.move_layout.lock().unwrap() = Some(move_layout());
+
+    setup.runtime.enable().unwrap();
+
+    assert!(setup.calls.take().contains(&Call::SetMoveAvailable(true)));
+}
+
+#[test]
+fn a_held_intent_goes_from_the_link_through_the_tick_into_the_component() {
+    let setup = Setup::new(true);
+    *setup.calls.move_layout.lock().unwrap() = Some(move_layout());
+    setup.runtime.enable().unwrap();
+    // SAFETY: amm_api_for returns the manager's static table
+    let table = unsafe { ApiTable::new(amm_api_for(AMM_ABI_MAJOR)) }.unwrap();
+    let link = ManagerLink::without_frame(table, MOVER_DESCRIPTOR, &setup.dirs.mod_config("test-mover")).unwrap();
+    link.acquire(Capability::Input).unwrap();
+    setup.calls.set_in_play(true);
+    setup.runtime.tick(RecordingCalls::CLIENT);
+
+    link.send_move(MoveIntent { forward: 1.0, sprint: true, ..MoveIntent::ZERO }).unwrap();
+    setup.runtime.tick(RecordingCalls::CLIENT);
+    let mut raw = [0u32; 6];
+    setup.state.fake_move().write(raw.as_mut_ptr() as usize);
+
+    assert_eq!(raw[0], (1 << 13) | (1 << 8));
+    assert_eq!(f32::from_bits(raw[2]), 1.0);
+    assert_eq!(f32::from_bits(raw[5]), 1.0);
+
+    link.release(Capability::Input);
+    setup.runtime.tick(RecordingCalls::CLIENT);
+    let mut after = [0u32; 6];
+    setup.state.fake_move().write(after.as_mut_ptr() as usize);
+    assert_eq!(after, [0u32; 6], "the lease ended, so the intent is gone");
+    setup.runtime.disable();
+    drop(link);
+}
+
+#[test]
+fn disable_drops_the_published_move_intent() {
+    let setup = Setup::new(false);
+    *setup.calls.move_layout.lock().unwrap() = Some(move_layout());
+    setup.runtime.enable().unwrap();
+    *setup.calls.move_intent.lock().unwrap() = Some(MoveIntent { forward: 1.0, ..MoveIntent::ZERO });
+    setup.calls.set_in_play(true);
+    setup.runtime.tick(RecordingCalls::CLIENT);
+
+    setup.runtime.disable();
+    let mut raw = [0u32; 6];
+    setup.state.fake_move().write(raw.as_mut_ptr() as usize);
+
+    assert_eq!(raw, [0u32; 6]);
 }
 
 #[test]
@@ -116,6 +191,19 @@ fn disable_releases_and_flushes_fake_keys_before_removing_hooks() {
     let up = at(Call::GameKey { controller: 0x5000, vk: 0x57, down: false, origin: 1 });
     assert!(release < up);
     assert!(up < at(Call::RemoveHooks(HookGroup::Tick)));
+}
+
+#[test]
+fn enable_gives_the_mouse_device_entry_to_the_fake_buttons() {
+    let setup = Setup::new(false);
+    *setup.calls.mouse_device.lock().unwrap() = Some(0x7700);
+    setup.runtime.enable().unwrap();
+    setup.calls.take();
+    setup.calls.queue_fake_pointer(&[PointerOp::Button { button: PointerButton::Left, down: true }]);
+
+    setup.state.fake_pointer().flush(setup.calls, RecordingCalls::CLIENT);
+
+    assert_eq!(setup.calls.take(), vec![Call::GameMouse { device: 0x7700, action: 1, data: 1, x: 0, y: 0 }]);
 }
 
 #[test]

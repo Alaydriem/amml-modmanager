@@ -11,6 +11,13 @@ fn send_key(handle: AmmHandle, vk: u32, down: u8) -> AmmStatus {
     unsafe { TestHost::api().send_key.unwrap_or_else(|| panic!("send_key"))(handle, vk, down) }
 }
 
+// the tick tells the host whether the game feed knows the keyboard controller
+fn feed_ready(ready: bool) -> usize {
+    let mut out = [AmmHostFakeKey { vk: 0, down: 0 }; 8];
+    // SAFETY: out holds 8 writable entries for the call
+    unsafe { amm_host_take_fake_keys(ready, out.as_mut_ptr(), out.len()) }
+}
+
 fn input_mod(host: &TestHost, id: &str) -> TestClient {
     let descriptor = Descriptors::with_claims(id, &[("Input", "Shared")], "");
     TestClient::register(host, &descriptor, TestMesh::triangle())
@@ -54,14 +61,14 @@ fn take_fake_keys_drains_in_order() {
     let client = input_mod(&host, "key-presser");
     let mut out = [AmmHostFakeKey { vk: 0, down: 0 }; 8];
     // SAFETY: out holds 8 writable entries for the call
-    let before = unsafe { amm_host_take_fake_keys(out.as_mut_ptr(), out.len()) };
+    let before = unsafe { amm_host_take_fake_keys(true, out.as_mut_ptr(), out.len()) };
 
     assert_eq!(send_key(client.handle(), KEY_W, 1), AmmStatus::Ok);
     assert_eq!(send_key(client.handle(), KEY_W, 0), AmmStatus::Ok);
     // SAFETY: out holds 8 writable entries for the call
-    let taken = unsafe { amm_host_take_fake_keys(out.as_mut_ptr(), out.len()) };
+    let taken = unsafe { amm_host_take_fake_keys(true, out.as_mut_ptr(), out.len()) };
     // SAFETY: out holds 8 writable entries for the call
-    let again = unsafe { amm_host_take_fake_keys(out.as_mut_ptr(), out.len()) };
+    let again = unsafe { amm_host_take_fake_keys(true, out.as_mut_ptr(), out.len()) };
 
     assert_eq!(before, 0);
     assert_eq!(taken, 2);
@@ -75,19 +82,50 @@ fn take_fake_keys_keeps_the_rest_for_the_next_call() {
     let host = TestHost::new();
     let client = input_mod(&host, "key-batcher");
     let mut out = [AmmHostFakeKey { vk: 0, down: 0 }; 1];
+    feed_ready(true);
     assert_eq!(send_key(client.handle(), KEY_W, 1), AmmStatus::Ok);
     assert_eq!(send_key(client.handle(), KEY_W, 0), AmmStatus::Ok);
 
     // SAFETY: out holds 1 writable entry for the call
-    let first = unsafe { amm_host_take_fake_keys(out.as_mut_ptr(), out.len()) };
+    let first = unsafe { amm_host_take_fake_keys(true, out.as_mut_ptr(), out.len()) };
     let first_key = (out[0].vk, out[0].down);
     // SAFETY: out holds 1 writable entry for the call
-    let second = unsafe { amm_host_take_fake_keys(out.as_mut_ptr(), out.len()) };
+    let second = unsafe { amm_host_take_fake_keys(true, out.as_mut_ptr(), out.len()) };
     let second_key = (out[0].vk, out[0].down);
     // SAFETY: a null buffer with a capacity of 0 writes nothing
-    let none = unsafe { amm_host_take_fake_keys(std::ptr::null_mut(), 0) };
+    let none = unsafe { amm_host_take_fake_keys(true, std::ptr::null_mut(), 0) };
 
     assert_eq!((first, first_key), (1, (KEY_W, 1)));
     assert_eq!((second, second_key), (1, (KEY_W, 0)));
     assert_eq!(none, 0);
+}
+
+#[test]
+fn send_key_before_the_feed_has_a_controller_is_not_ready() {
+    let host = TestHost::new();
+    let client = input_mod(&host, "key-early");
+
+    let early = send_key(client.handle(), KEY_W, 1);
+    let still = (feed_ready(false), send_key(client.handle(), KEY_W, 1));
+    feed_ready(true);
+    let ready = send_key(client.handle(), KEY_W, 1);
+
+    assert_eq!(early, AmmStatus::NotReady);
+    assert_eq!(still, (0, AmmStatus::NotReady));
+    assert_eq!(ready, AmmStatus::Ok);
+    assert_eq!(feed_ready(true), 1);
+}
+
+#[test]
+fn send_key_with_a_full_queue_is_busy() {
+    let host = TestHost::new();
+    let client = input_mod(&host, "key-flood");
+    feed_ready(true);
+    for vk in 0..128 {
+        assert_eq!(send_key(client.handle(), vk, 1), AmmStatus::Ok);
+        assert_eq!(send_key(client.handle(), vk, 0), AmmStatus::Ok);
+    }
+
+    assert_eq!(send_key(client.handle(), 200, 1), AmmStatus::Busy);
+    assert_eq!(send_key(client.handle(), 200, 0), AmmStatus::Ok);
 }

@@ -2,6 +2,7 @@ use std::ffi::c_void;
 use std::io::Read;
 use std::path::Path;
 
+use amm_abi::convert::move_intent::MoveIntentCodec;
 use amm_abi::convert::pointer_op::PointerOpCodec;
 use amm_abi::types::{
     AmmCallbacks, AmmCapability, AmmHandle, AmmRenderSize, AmmRenderSizeState, AmmScreenshotLayers, AmmStatus,
@@ -11,7 +12,7 @@ use amm_core::services::icon::IconDecoder;
 use amm_core::structs::capture::ScreenshotLayers;
 use amm_core::structs::descriptor::Capability;
 use amm_core::structs::event::ModEvent;
-use amm_core::structs::input::PointerOp;
+use amm_core::structs::input::{MoveIntent, PointerOp};
 use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::manager::TextureGrant;
 use amm_core::structs::menu::{MenuEntryId, MenuScreens};
@@ -305,7 +306,8 @@ impl ManagerLink {
     /// Holds the game key `vk` down (`down`) or lets it go. The mod must hold the `Input` lease: `NotPermitted`
     /// otherwise, and while the panel is open or another mod holds `Input`. A key above 255 is `InvalidArgument`.
     /// When the manager lets go of a held key itself, the mod gets `ModEvent::FakeKeysReleased`. A manager older
-    /// than ABI 2.1 is `Unsupported`.
+    /// than ABI 2.1 is `Unsupported`. A down is `LinkError::Status(13)` (`NotReady`) while the manager does not yet
+    /// know the game's keyboard controller, and `LinkError::Status(12)` (`Busy`) while its key queue is full.
     pub fn send_key(&self, vk: u32, down: bool) -> Result<(), LinkError> {
         let Some(send_key) = self.table.api().send_key else {
             return Err(LinkError::from(AmmStatus::Unsupported));
@@ -324,7 +326,8 @@ impl ManagerLink {
     /// mod holds `Input`. A wheel turn past 32 notches either way, or a look turn past 360000 millidegrees either
     /// way, is `InvalidArgument`. The manager adds the look turns of one axis into one pending value, held to
     /// 360000 either way, and applies it once per client update (a frame). A manager queue full of button actions
-    /// is `QueueFull`, and nothing changes. When the manager lets go of a held button itself, the mod gets
+    /// is `QueueFull`, and nothing changes. From ABI 2.4, a button down or a wheel turn is `NotReady` while the
+    /// manager does not yet know the game's mouse device. When the manager lets go of a held button itself, the mod gets
     /// `ModEvent::FakeKeysReleased`. A manager older than ABI 2.2 is `Unsupported`. A manager of ABI 2.2 answers
     /// `InvalidArgument` to the look turns; they need ABI 2.3.
     pub fn send_pointer(&self, op: PointerOp) -> Result<(), LinkError> {
@@ -334,6 +337,28 @@ impl ManagerLink {
         let (code, value) = PointerOpCodec::encode(op);
         // SAFETY: send_pointer takes plain values; the handle is this link's until drop
         let status = unsafe { send_pointer(self.handle, code, value) };
+        match status {
+            AmmStatus::Ok => Ok(()),
+            other => Err(LinkError::from(other)),
+        }
+    }
+
+    /// Holds a movement of the local player with no keyboard, until the next call: `forward` and `left` from -1.0
+    /// to 1.0 (positive is forward and to the left), and jump, sneak and sprint held while set, whatever the
+    /// player's toggle options say. `MoveIntent::ZERO` is the clear and is always `Ok`; the game's own keys work
+    /// again on the next tick. Any other intent needs the active `Input` lease and a closed panel, else
+    /// `NotPermitted`; it is `NotReady` while the game has no local player in a world, and `InvalidArgument` for an
+    /// axis outside -1.0 to 1.0. A manager older than ABI 2.4, or one whose game has no move entries, is
+    /// `Unsupported`, so the mod can fall back to `send_key`. When the manager clears the intent itself (the lease
+    /// ends, another mod gains `Input` or sets an intent, the panel opens, focus is lost, the world is left), the
+    /// mod gets `ModEvent::FakeKeysReleased`.
+    pub fn send_move(&self, intent: MoveIntent) -> Result<(), LinkError> {
+        let Some(send_move) = self.table.api().send_move else {
+            return Err(LinkError::from(AmmStatus::Unsupported));
+        };
+        let (forward_milli, left_milli, flags) = MoveIntentCodec::encode(intent);
+        // SAFETY: send_move takes plain values; the handle is this link's until drop
+        let status = unsafe { send_move(self.handle, forward_milli, left_milli, flags) };
         match status {
             AmmStatus::Ok => Ok(()),
             other => Err(LinkError::from(other)),

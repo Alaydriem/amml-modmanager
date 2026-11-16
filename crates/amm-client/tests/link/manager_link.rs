@@ -8,7 +8,7 @@ use amm_core::errors::LinkError;
 use amm_core::services::icon::IconDecoder;
 use amm_core::structs::descriptor::Capability;
 use amm_core::structs::event::{KeybindPhase, ModEvent};
-use amm_core::structs::input::{PointerButton, PointerOp};
+use amm_core::structs::input::{MoveIntent, PointerButton, PointerOp};
 use amm_core::structs::mesh::GamePicture;
 use amm_core::structs::registry::ModIndex;
 use amm_core::structs::render::{RenderSize, RenderSizeState};
@@ -549,6 +549,37 @@ fn send_pointer_on_minor_1_table_is_unsupported() {
 
     assert_eq!(sent, Err(LinkError::Status(AmmStatus::Unsupported as i32)));
     assert!(FakeTable::with(|state| state.sent_pointer().is_empty()));
+}
+
+#[test]
+fn send_move_passes_the_axes_in_thousandths_and_the_flags() {
+    let link = FakeTable::link_without_frame();
+    let walk = MoveIntent { forward: 1.0, left: -0.25, jump: false, sneak: true, sprint: true };
+
+    assert_eq!(link.send_move(walk), Ok(()));
+    assert_eq!(link.send_move(MoveIntent::ZERO), Ok(()));
+
+    assert_eq!(FakeTable::with(|state| state.sent_moves()), vec![(1000, -250, 6), (0, 0, 0)]);
+}
+
+#[test]
+fn send_move_on_minor_3_table_is_unsupported() {
+    let link = FakeTable::link_without_frame_on(FakeTable::api_minor_3());
+
+    let sent = link.send_move(MoveIntent { forward: 1.0, ..MoveIntent::ZERO });
+
+    assert_eq!(sent, Err(LinkError::Status(AmmStatus::Unsupported as i32)));
+    assert!(FakeTable::with(|state| state.sent_moves().is_empty()));
+}
+
+#[test]
+fn send_move_maps_not_ready() {
+    let link = FakeTable::link_without_frame();
+    FakeTable::with(|state| state.send_move_status = AmmStatus::NotReady);
+
+    let sent = link.send_move(MoveIntent { forward: 1.0, ..MoveIntent::ZERO });
+
+    assert_eq!(sent, Err(LinkError::Status(AmmStatus::NotReady as i32)));
 }
 
 #[test]

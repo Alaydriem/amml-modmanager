@@ -5,6 +5,7 @@ pub mod gamepad;
 pub mod input;
 pub mod lifecycle;
 pub mod logger;
+pub mod move_input;
 pub mod player_turn;
 pub mod render_size;
 pub mod tick;
@@ -20,6 +21,7 @@ pub use input::{
 };
 pub use lifecycle::{amm_host_create, amm_host_destroy};
 pub use logger::{amm_host_log, amm_host_set_console};
+pub use move_input::{amm_host_move_intent, amm_host_set_move_available};
 pub use player_turn::amm_host_blocks_player_turn;
 pub use render_size::{
     amm_host_render_size, amm_host_render_size_shutdown, amm_host_window_changed, amm_host_window_size,

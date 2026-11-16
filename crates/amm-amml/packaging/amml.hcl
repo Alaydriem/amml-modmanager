@@ -17,6 +17,8 @@ entries = [
   "ClientInstance.isShowingMenu",
   # optional: each one missing turns off only its own feature
   "LocalPlayer.applyTurnDelta",
+  "MouseDevice.instance",
+  "HIDControllerGameCoreDesktop.update",
   "GameControllerHandler_GameCore.refresh",
   "ClientInstance.onPlayerLoaded",
   "ClientExitLevel.hook",
@@ -24,6 +26,17 @@ entries = [
   "ClientInstance.getOptions",
   "IOptionRegistry.setHideGUI",
   "IOptionRegistry.getHideHud",
+  "ClientInputUpdateSystem.extractRawHIDInput",
+  "RawMoveInputComponent.mInputState",
+  "RawMoveInputComponent.mRawMove",
+  "MoveInputState.mAnalogMoveVector",
+  "MoveInputState.maskSneakTest",
+  "MoveInputState.maskJumpDown",
+  "MoveInputState.bitSprintDown",
+  "MoveInputState.bitUp",
+  "MoveInputState.bitDown",
+  "MoveInputState.bitLeft",
+  "MoveInputState.bitRight",
 ]
 
 listing {

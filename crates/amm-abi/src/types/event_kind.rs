@@ -29,7 +29,8 @@ pub enum AmmEventKind {
     /// `locale` again.
     LocaleChanged,
     /// Since 2.1. The manager let go of the fake keys the mod held with `send_key`, or (since 2.2) the mouse buttons
-    /// it held with `send_pointer`, because the panel opened, the game window lost focus, the world was left or the
-    /// mod was disabled. The mod drops its own record of them. No field.
+    /// it held with `send_pointer`, or (since 2.4) the move intent it held with `send_move`, because the panel
+    /// opened, the game window lost focus, the world was left or the mod was disabled; a move intent also goes when
+    /// the mod's `Input` lease ends or another mod sets one. The mod drops its own record of them. No field.
     FakeKeysReleased,
 }

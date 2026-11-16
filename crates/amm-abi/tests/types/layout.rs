@@ -48,7 +48,8 @@ fn api_table_field_offsets_are_stable() {
     assert_eq!(offset_of!(AmmApi, send_key), 16 + 30 * 8);
     assert_eq!(offset_of!(AmmApi, send_pointer), 16 + 31 * 8);
     assert_eq!(offset_of!(AmmApi, panel_open), 16 + 32 * 8);
-    assert_eq!(size_of::<AmmApi>(), 16 + 33 * 8);
+    assert_eq!(offset_of!(AmmApi, send_move), 16 + 33 * 8);
+    assert_eq!(size_of::<AmmApi>(), 16 + 34 * 8);
 }
 
 #[test]
@@ -76,8 +77,9 @@ fn wire_values_are_stable() {
         AmmStatus::Unsupported,
         AmmStatus::ManagerMissing,
         AmmStatus::Busy,
+        AmmStatus::NotReady,
     ];
-    assert_eq!(status.map(|value| value as i32), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    assert_eq!(status.map(|value| value as i32), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     let event = [
         AmmEventKind::Enabled,
         AmmEventKind::Disabled,
@@ -394,7 +396,7 @@ fn capture_stream_frame_layout_is_stable() {
 /// grows `size_of`, so the `size` a side declares tells which fields it has.
 #[test]
 fn sized_structs_end_without_tail_padding() {
-    assert_eq!(offset_of!(AmmApi, panel_open) + 8, size_of::<AmmApi>());
+    assert_eq!(offset_of!(AmmApi, send_move) + 8, size_of::<AmmApi>());
     assert_eq!(offset_of!(AmmCallbacks, textures_lost) + 8, size_of::<AmmCallbacks>());
     assert_eq!(offset_of!(AmmFrameInput, reserved) + 6, size_of::<AmmFrameInput>());
     assert_eq!(offset_of!(AmmFrameOutput, reserved) + 4, size_of::<AmmFrameOutput>());

@@ -54,20 +54,23 @@ pub extern "C" fn amm_host_take_focus_loss_owed() -> bool {
     Boundary::guard(|| HostCell::global().with(|runtime| Ok(runtime.take_focus_loss_owed()))).unwrap_or(false)
 }
 
-/// Game thread, once per tick. Moves up to `capacity` fake key presses the mods asked for with `send_key` into
-/// `out`, oldest first, and returns how many it wrote; the rest wait for the next call. The caller feeds each press
-/// to the game as keyboard input. 0, with nothing written, with no host or with a null or unaligned `out`.
+/// Game thread, once per tick. `feed_ready` says whether the caller knows the game's keyboard controller; while it
+/// is false, `send_key` refuses a down with `NotReady` and nothing is taken. Otherwise moves up to `capacity` fake
+/// key presses the mods asked for with `send_key` into `out`, oldest first, and returns how many it wrote; the rest
+/// wait for the next call. The caller feeds each press to the game as keyboard input. 0, with nothing written, with
+/// no host or with a null or unaligned `out`.
 ///
 /// # Safety
 ///
 /// `out` is null or has room for `capacity` entries, writable for the call.
-pub unsafe extern "C" fn amm_host_take_fake_keys(out: *mut AmmHostFakeKey, capacity: usize) -> usize {
+pub unsafe extern "C" fn amm_host_take_fake_keys(feed_ready: bool, out: *mut AmmHostFakeKey, capacity: usize) -> usize {
     Boundary::guard(|| {
-        if capacity == 0 {
-            return Ok(0);
-        }
-        let out = Boundary::writable(out)?;
         HostCell::global().with(|runtime| {
+            runtime.set_key_feed_ready(feed_ready);
+            if !feed_ready || capacity == 0 {
+                return Ok(0);
+            }
+            let out = Boundary::writable(out)?;
             Ok(runtime.take_fake_keys(capacity, |position, op| {
                 // SAFETY: out is non-null and aligned, as checked, and the caller gives room for `capacity`
                 // entries; position is below capacity
@@ -78,20 +81,27 @@ pub unsafe extern "C" fn amm_host_take_fake_keys(out: *mut AmmHostFakeKey, capac
     .unwrap_or(0)
 }
 
-/// Game thread, once per tick. Moves up to `capacity` fake mouse actions the mods asked for with `send_pointer` into
-/// `out`, oldest first, and returns how many it wrote; the rest wait for the next call. The caller feeds each action
-/// to the game as mouse input. 0, with nothing written, with no host or with a null or unaligned `out`.
+/// Game thread, once per tick. `feed_ready` says whether the caller knows the game's mouse device; while it is
+/// false, `send_pointer` refuses a button down and a wheel turn with `NotReady`. Moves up to `capacity` fake mouse
+/// actions the mods asked for with `send_pointer` into `out`, oldest first, in both states (a look turn needs no
+/// device), and returns how many it wrote; the rest wait for the next call. The caller feeds each action to the game
+/// as mouse input. 0, with nothing written, with no host or with a null or unaligned `out`.
 ///
 /// # Safety
 ///
 /// `out` is null or has room for `capacity` entries, writable for the call.
-pub unsafe extern "C" fn amm_host_take_fake_pointer(out: *mut AmmHostFakePointer, capacity: usize) -> usize {
+pub unsafe extern "C" fn amm_host_take_fake_pointer(
+    feed_ready: bool,
+    out: *mut AmmHostFakePointer,
+    capacity: usize,
+) -> usize {
     Boundary::guard(|| {
-        if capacity == 0 {
-            return Ok(0);
-        }
-        let out = Boundary::writable(out)?;
         HostCell::global().with(|runtime| {
+            runtime.set_pointer_feed_ready(feed_ready);
+            if capacity == 0 {
+                return Ok(0);
+            }
+            let out = Boundary::writable(out)?;
             Ok(runtime.take_fake_pointer(capacity, |position, op| {
                 let (op, value) = PointerOpCodec::encode(op);
                 // SAFETY: out is non-null and aligned, as checked, and the caller gives room for `capacity`

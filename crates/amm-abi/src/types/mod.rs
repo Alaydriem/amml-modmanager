@@ -15,6 +15,7 @@ pub mod frame_output;
 pub mod handle;
 pub mod log_level;
 pub mod mesh_view;
+pub mod move_flags;
 pub mod pointer_op;
 pub mod render_size;
 pub mod render_size_state;
@@ -44,6 +45,7 @@ pub use frame_output::AmmFrameOutput;
 pub use handle::AmmHandle;
 pub use log_level::AmmLogLevel;
 pub use mesh_view::AmmMeshView;
+pub use move_flags::{AMM_MOVE_AXIS_MAX, AMM_MOVE_JUMP, AMM_MOVE_SNEAK, AMM_MOVE_SPRINT};
 pub use pointer_op::{
     AMM_POINTER_OP_LEFT, AMM_POINTER_OP_MIDDLE, AMM_POINTER_OP_RIGHT, AMM_POINTER_OP_TURN_PITCH,
     AMM_POINTER_OP_TURN_YAW, AMM_POINTER_OP_WHEEL,

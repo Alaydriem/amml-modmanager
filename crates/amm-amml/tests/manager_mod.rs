@@ -28,3 +28,11 @@ fn the_manifest_lists_every_hooked_and_called_entry() {
         assert!(entries.contains(&Expression::String(slot.entry().to_string())), "{} is not listed", slot.entry());
     }
 }
+
+#[test]
+fn the_controller_update_hook_is_optional() {
+    let hooks = ManagerMod::hooks();
+    let spec = hooks.iter().find(|spec| spec.entry == ManagerMod::CONTROLLER_UPDATE);
+
+    assert!(spec.is_some_and(|spec| !spec.required));
+}

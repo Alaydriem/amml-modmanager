@@ -1,9 +1,12 @@
 use amm_core::structs::input::{PointerButton, PointerOp, TurnAxis};
 use amml_modmanager::services::{FakePointerSender, ManagerState};
 
+use crate::support::log_capture::LogCapture;
 use crate::support::recording_calls::{Call, RecordingCalls};
 
 const DEVICE: usize = 0x9000;
+// the address the `MouseDevice.instance` entry gave
+const ENTRY_DEVICE: usize = 0x7700;
 
 fn feed(action: u8, data: i8) -> Call {
     Call::GameMouse { device: DEVICE, action, data, x: 40, y: 30 }
@@ -145,4 +148,95 @@ fn a_turn_without_a_client_is_dropped() {
     sender.flush(calls, 0);
 
     assert_eq!(calls.take(), vec![]);
+}
+
+fn left(down: bool) -> PointerOp {
+    PointerOp::Button { button: PointerButton::Left, down }
+}
+
+fn entry_feed(action: u8, data: i8, x: i16, y: i16) -> Call {
+    Call::GameMouse { device: ENTRY_DEVICE, action, data, x, y }
+}
+
+#[test]
+fn flush_tells_the_host_whether_the_feed_has_a_mouse_device() {
+    let calls = RecordingCalls::leaked(ManagerState::leaked(), false);
+    let sender = FakePointerSender::new();
+
+    sender.flush(calls, RecordingCalls::CLIENT);
+    let before = calls.pointer_feed();
+    sender.set_device(ENTRY_DEVICE);
+    sender.flush(calls, RecordingCalls::CLIENT);
+
+    assert_eq!((before, calls.pointer_feed()), (Some(false), Some(true)));
+}
+
+#[test]
+fn a_device_from_the_entry_feeds_buttons_with_no_real_mouse_event() {
+    let calls = RecordingCalls::leaked(ManagerState::leaked(), false);
+    calls.queue_fake_pointer(&[left(true), left(false)]);
+    let sender = FakePointerSender::new();
+    sender.set_device(ENTRY_DEVICE);
+
+    sender.flush(calls, RecordingCalls::CLIENT);
+
+    let button = FakePointerSender::LEFT_BUTTON;
+    assert_eq!(calls.take(), vec![entry_feed(button, 1, 0, 0), entry_feed(button, 0, 0, 0)]);
+    assert_eq!(calls.pending_fake_pointer(), vec![]);
+}
+
+#[test]
+fn a_real_event_on_the_entry_device_gives_the_point() {
+    let calls = RecordingCalls::leaked(ManagerState::leaked(), false);
+    calls.queue_fake_pointer(&[left(true)]);
+    let sender = FakePointerSender::new();
+    sender.set_device(ENTRY_DEVICE);
+    sender.note(ENTRY_DEVICE, 40, 30);
+
+    sender.flush(calls, RecordingCalls::CLIENT);
+
+    assert_eq!(calls.take(), vec![entry_feed(FakePointerSender::LEFT_BUTTON, 1, 40, 30)]);
+}
+
+#[test]
+fn a_real_event_on_another_device_does_not_replace_the_entry_device() {
+    let calls = RecordingCalls::leaked(ManagerState::leaked(), false);
+    calls.queue_fake_pointer(&[left(true)]);
+    let sender = FakePointerSender::new();
+    sender.set_device(ENTRY_DEVICE);
+    sender.note(DEVICE, 40, 30);
+
+    sender.flush(calls, RecordingCalls::CLIENT);
+
+    assert_eq!(calls.take(), vec![entry_feed(FakePointerSender::LEFT_BUTTON, 1, 0, 0)]);
+}
+
+#[test]
+fn the_entry_device_fed_on_another_thread_than_the_tick_is_not_ready() {
+    let calls = RecordingCalls::leaked(ManagerState::leaked(), false);
+    calls.queue_fake_pointer(&[left(false)]);
+    let sender: &'static FakePointerSender = Box::leak(Box::new(FakePointerSender::new()));
+    sender.set_device(ENTRY_DEVICE);
+    std::thread::spawn(move || sender.note(ENTRY_DEVICE, 40, 30)).join().unwrap();
+
+    sender.flush(calls, RecordingCalls::CLIENT);
+
+    assert_eq!(calls.pointer_feed(), Some(false));
+    assert_eq!(calls.take(), vec![]);
+}
+
+#[test]
+fn the_known_mouse_device_is_logged_once() {
+    LogCapture::install();
+    let calls = RecordingCalls::leaked(ManagerState::leaked(), false);
+    let sender = FakePointerSender::new();
+
+    sender.flush(calls, RecordingCalls::CLIENT);
+    assert_eq!(LogCapture::count(FakePointerSender::DEVICE_LINE), 0);
+    sender.set_device(ENTRY_DEVICE);
+    for _ in 0..3 {
+        sender.flush(calls, RecordingCalls::CLIENT);
+    }
+
+    assert_eq!(LogCapture::count(FakePointerSender::DEVICE_LINE), 1);
 }

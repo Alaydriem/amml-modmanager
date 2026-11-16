@@ -81,6 +81,12 @@ impl FakeKeys {
         lost
     }
 
+    /// True when the mod holds `vk`.
+    pub fn holds(&self, index: ModIndex, vk: u32) -> bool {
+        let slot = usize::from(index.0);
+        Self::locate(vk).is_some_and(|(word, bit)| slot < self.held.len() && self.held[slot][word] & bit != 0)
+    }
+
     /// True when any mod holds `vk`.
     pub fn is_held(&self, vk: u32) -> bool {
         Self::locate(vk).is_some_and(|(word, bit)| self.held.iter().any(|set| set[word] & bit != 0))

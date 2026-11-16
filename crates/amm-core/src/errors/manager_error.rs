@@ -26,4 +26,12 @@ pub enum ManagerError {
     RenderSizeClosed,
     #[error("the fake pointer queue is full of button actions")]
     PointerQueueFull,
+    #[error("the game entries this call needs did not resolve")]
+    Unsupported,
+    #[error(
+        "the game is not ready for this call: no local player in a world, or no keyboard controller or mouse device yet"
+    )]
+    NotReady,
+    #[error("the fake key queue is full")]
+    KeyQueueFull,
 }

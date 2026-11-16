@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use amm_abi::types::AmmStatus;
-use amm_core::structs::input::{FakeKeyOp, PointerOp};
+use amm_core::structs::input::{FakeKeyOp, MoveIntent, MoveLayout, PointerOp};
 use amm_overlay::{PointerButton, ShutdownOutcome, UninstallOutcome};
 use amml_msvc::MsvcString;
 use amml_sdk::SdkError;
@@ -36,8 +36,9 @@ pub trait GameCalls: Sync {
     /// `amm_host_key`; true when the game must not see the key. `mods` is 1 Ctrl, 2 Shift, 4 Alt.
     fn host_key(&self, vk: u32, down: bool, repeat: bool, mods: u8, now_ms: u64) -> bool;
 
-    /// `amm_host_take_fake_keys` until the host has none left: appends the queued presses to `out`, oldest first.
-    fn take_fake_keys(&self, out: &mut Vec<FakeKeyOp>);
+    /// `amm_host_take_fake_keys` until the host has none left: tells the host whether the feed knows the keyboard
+    /// controller and, when it does, appends the queued presses to `out`, oldest first.
+    fn take_fake_keys(&self, feed_ready: bool, out: &mut Vec<FakeKeyOp>);
 
     /// `amm_host_release_fake_keys`: the host queues the release of every fake key and mouse button a mod holds.
     fn release_fake_keys(&self);
@@ -46,9 +47,9 @@ pub trait GameCalls: Sync {
     /// detour. `origin` is the `InputOrigin` of a key down and is ignored for a key up.
     fn game_key(&self, controller: usize, vk: u32, down: bool, origin: i32);
 
-    /// `amm_host_take_fake_pointer` until the host has none left: appends the queued mouse actions to `out`, oldest
-    /// first.
-    fn take_fake_pointer(&self, out: &mut Vec<PointerOp>);
+    /// `amm_host_take_fake_pointer` until the host has none left: tells the host whether the feed knows the mouse
+    /// device, and appends the queued mouse actions to `out`, oldest first, in both states.
+    fn take_fake_pointer(&self, feed_ready: bool, out: &mut Vec<PointerOp>);
 
     /// The game's own `MouseDevice::feed` on `device`, past the manager's feed detour: `action` is the
     /// `actionButtonId`, `data` the `buttonData`, `x`, `y` the pointer, with no movement.
@@ -145,6 +146,20 @@ pub trait GameCalls: Sync {
 
     /// `IOptionRegistry::setHideGUI`.
     fn set_hide_gui(&self, options: usize, hide: bool);
+
+    /// The address of the game's `MouseDevice` the `MouseDevice.instance` entry gave at `install_hooks`; `None` when
+    /// it was missing.
+    fn mouse_device(&self) -> Option<usize>;
+
+    /// The layout the move entries gave at `install_hooks`; `None` when one was missing or the values were not valid.
+    fn move_layout(&self) -> Option<MoveLayout>;
+
+    /// `amm_host_set_move_available`.
+    fn set_move_available(&self, available: bool);
+
+    /// `amm_host_move_intent`: tells the host whether the game has a local player in an active world, and returns
+    /// the held move intent; `None` when no mod holds one.
+    fn host_move(&self, player_ready: bool) -> Option<MoveIntent>;
 
     /// One line in the manager's AMML log.
     fn log(&self, level: AmmlLogLevel, message: &str);

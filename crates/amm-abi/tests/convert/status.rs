@@ -22,6 +22,13 @@ fn manager_errors_delegate_to_the_inner_mapping() {
 }
 
 #[test]
+fn a_missing_game_entry_is_unsupported_a_missing_player_is_not_ready_and_a_full_key_queue_is_busy() {
+    assert_eq!(AmmStatus::from(&ManagerError::Unsupported), AmmStatus::Unsupported);
+    assert_eq!(AmmStatus::from(&ManagerError::NotReady), AmmStatus::NotReady);
+    assert_eq!(AmmStatus::from(&ManagerError::KeyQueueFull), AmmStatus::Busy);
+}
+
+#[test]
 fn a_missing_manager_status_becomes_a_missing_manager_link_error() {
     assert_eq!(LinkError::from(AmmStatus::ManagerMissing), LinkError::ManagerMissing);
 }
@@ -37,7 +44,8 @@ fn a_status_integer_converts_back_and_an_unknown_one_is_rejected() {
     assert_eq!(AmmStatus::try_from(8), Ok(AmmStatus::QueueFull));
     assert_eq!(AmmStatus::try_from(11), Ok(AmmStatus::ManagerMissing));
     assert_eq!(AmmStatus::try_from(12), Ok(AmmStatus::Busy));
-    assert_eq!(AmmStatus::try_from(13), Err(13));
+    assert_eq!(AmmStatus::try_from(13), Ok(AmmStatus::NotReady));
+    assert_eq!(AmmStatus::try_from(14), Err(14));
     assert_eq!(AmmStatus::try_from(-1), Err(-1));
 }
 

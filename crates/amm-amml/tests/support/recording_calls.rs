@@ -2,9 +2,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use amm_abi::convert::move_intent::MoveIntentCodec;
 use amm_abi::types::AmmStatus;
-use amm_core::structs::input::{FakeKeyOp, PointerOp};
-use amm_ffi::host::{amm_host_create, amm_host_destroy, amm_host_release_fake_keys, amm_host_tick};
+use amm_core::structs::input::{FakeKeyOp, MoveIntent, MoveLayout, PointerOp};
+use amm_ffi::host::{
+    amm_host_create, amm_host_destroy, amm_host_move_intent, amm_host_release_fake_keys, amm_host_set_move_available,
+    amm_host_tick,
+};
+use amm_ffi::types::AmmHostMove;
 use amm_overlay::{PointerButton, ShutdownOutcome, UninstallOutcome};
 use amml_modmanager::ManagerPaths;
 use amml_modmanager::services::ManagerState;
@@ -42,6 +47,8 @@ pub enum Call {
     GrabMouse { game: usize, latch_raised: bool },
     ReleaseString,
     SetHideGui(bool),
+    SetMoveAvailable(bool),
+    HostMove { player_ready: bool },
     Log(String),
 }
 
@@ -71,8 +78,18 @@ pub struct RecordingCalls {
     pub screen_name: Mutex<Option<String>>,
     pub options: Mutex<Option<usize>>,
     pub player_hides_hud: AtomicBool,
+    // what `move_layout` answers, as if the move entries resolved at install
+    pub move_layout: Mutex<Option<MoveLayout>>,
+    // the intent the host holds for `host_move`
+    pub move_intent: Mutex<Option<MoveIntent>>,
     fake_keys: Mutex<Vec<FakeKeyOp>>,
+    // the feed readiness of the last `take_fake_keys`
+    key_feed: Mutex<Option<bool>>,
     fake_pointer: Mutex<Vec<PointerOp>>,
+    // the feed readiness of the last `take_fake_pointer`
+    pointer_feed: Mutex<Option<bool>>,
+    // what `mouse_device` answers, as if the mouse device entry resolved at install
+    pub mouse_device: Mutex<Option<usize>>,
     now: AtomicU64,
     calls: Mutex<Vec<Call>>,
 }
@@ -112,8 +129,13 @@ impl RecordingCalls {
             screen_name: Mutex::new(None),
             options: Mutex::new(Some(Self::OPTIONS)),
             player_hides_hud: AtomicBool::new(false),
+            move_layout: Mutex::new(None),
+            move_intent: Mutex::new(None),
             fake_keys: Mutex::new(Vec::new()),
+            key_feed: Mutex::new(None),
             fake_pointer: Mutex::new(Vec::new()),
+            pointer_feed: Mutex::new(None),
+            mouse_device: Mutex::new(None),
             now: AtomicU64::new(0),
             calls: Mutex::new(Vec::new()),
         }))
@@ -128,6 +150,16 @@ impl RecordingCalls {
         self.local_player.store(Self::PLAYER, Ordering::SeqCst);
         self.world_active.store(true, Ordering::SeqCst);
         self.showing_menu.store(!in_play, Ordering::SeqCst);
+    }
+
+    /// Whether the last `take_fake_keys` told the host the feed knows the keyboard controller; `None` before one.
+    pub fn key_feed(&self) -> Option<bool> {
+        *self.key_feed.lock().unwrap()
+    }
+
+    /// Whether the last `take_fake_pointer` told the host the feed knows the mouse device; `None` before one.
+    pub fn pointer_feed(&self) -> Option<bool> {
+        *self.pointer_feed.lock().unwrap()
     }
 
     /// Fake key presses the host holds for the next `take_fake_keys`.
@@ -214,8 +246,11 @@ impl GameCalls for RecordingCalls {
         self.consume_keys.load(Ordering::SeqCst)
     }
 
-    fn take_fake_keys(&self, out: &mut Vec<FakeKeyOp>) {
-        out.append(&mut self.fake_keys.lock().unwrap());
+    fn take_fake_keys(&self, feed_ready: bool, out: &mut Vec<FakeKeyOp>) {
+        *self.key_feed.lock().unwrap() = Some(feed_ready);
+        if feed_ready {
+            out.append(&mut self.fake_keys.lock().unwrap());
+        }
     }
 
     fn release_fake_keys(&self) {
@@ -229,7 +264,8 @@ impl GameCalls for RecordingCalls {
         self.record(Call::GameKey { controller, vk, down, origin });
     }
 
-    fn take_fake_pointer(&self, out: &mut Vec<PointerOp>) {
+    fn take_fake_pointer(&self, feed_ready: bool, out: &mut Vec<PointerOp>) {
+        *self.pointer_feed.lock().unwrap() = Some(feed_ready);
         out.append(&mut self.fake_pointer.lock().unwrap());
     }
 
@@ -364,6 +400,32 @@ impl GameCalls for RecordingCalls {
 
     fn set_hide_gui(&self, _options: usize, hide: bool) {
         self.record(Call::SetHideGui(hide));
+    }
+
+    fn mouse_device(&self) -> Option<usize> {
+        *self.mouse_device.lock().unwrap()
+    }
+
+    fn move_layout(&self) -> Option<MoveLayout> {
+        *self.move_layout.lock().unwrap()
+    }
+
+    fn set_move_available(&self, available: bool) {
+        self.record(Call::SetMoveAvailable(available));
+        if self.real_host {
+            amm_host_set_move_available(available);
+        }
+    }
+
+    fn host_move(&self, player_ready: bool) -> Option<MoveIntent> {
+        self.record(Call::HostMove { player_ready });
+        if !self.real_host {
+            return *self.move_intent.lock().unwrap();
+        }
+        let mut out = AmmHostMove { forward_milli: 0, left_milli: 0, flags: 0 };
+        // SAFETY: out is a writable local
+        let held = unsafe { amm_host_move_intent(player_ready, &mut out) };
+        held.then(|| MoveIntentCodec::decode(out.forward_milli, out.left_milli, out.flags).unwrap())
     }
 
     fn log(&self, _level: AmmlLogLevel, message: &str) {

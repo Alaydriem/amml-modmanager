@@ -1,4 +1,5 @@
 mod fake_key_sender;
+mod fake_move_writer;
 mod fake_pointer_sender;
 mod frame_state;
 mod game_hook_set;
@@ -10,6 +11,8 @@ mod manager_input_sink;
 mod manager_lifecycle;
 mod manager_runtime;
 mod menu_screen;
+mod mouse_device_slot;
 mod mouse_grab;
 mod mouse_input;
+mod move_layout_slots;
 mod tick_service;

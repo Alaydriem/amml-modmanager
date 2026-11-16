@@ -1,19 +1,21 @@
 #![allow(unsafe_code)]
 
 use std::ffi::c_void;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use amm_abi::convert::move_intent::MoveIntentCodec;
 use amm_abi::convert::pointer_op::PointerOpCodec;
 use amm_abi::types::AmmStatus;
-use amm_core::structs::input::{FakeKeyOp, PointerOp};
+use amm_core::structs::input::{FakeKeyOp, MoveIntent, MoveLayout, PointerOp};
 use amm_ffi::host::{
     amm_host_blocks_gamepad, amm_host_blocks_player_turn, amm_host_create, amm_host_destroy, amm_host_game_point,
-    amm_host_key, amm_host_pointer, amm_host_release_fake_keys, amm_host_render_size_shutdown, amm_host_set_console,
-    amm_host_take_fake_keys, amm_host_take_fake_pointer, amm_host_take_focus_loss_owed, amm_host_tick, amm_host_world,
+    amm_host_key, amm_host_move_intent, amm_host_pointer, amm_host_release_fake_keys, amm_host_render_size_shutdown,
+    amm_host_set_console, amm_host_set_move_available, amm_host_take_fake_keys, amm_host_take_fake_pointer,
+    amm_host_take_focus_loss_owed, amm_host_tick, amm_host_world,
 };
-use amm_ffi::types::{AmmHostFakeKey, AmmHostFakePointer, AmmHostPointerKind};
+use amm_ffi::types::{AmmHostFakeKey, AmmHostFakePointer, AmmHostMove, AmmHostPointerKind};
 use amm_overlay::{Overlay, PointerButton, ShutdownOutcome, SizeMessage, UninstallOutcome, WndProcRouter};
 use amml_msvc::{MemberCall, MsvcString};
 use amml_sdk::amml_abi::AmmlLogLevel;
@@ -26,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetCursorPos, GetFo
 
 use super::{
     AmmlHookHost, AmmlHookInstaller, ConsoleMirror, GameHookSet, GamePointer, GameSlots, LoaderHeap, ManagerInputSink,
-    ManagerOverlayHost,
+    ManagerOverlayHost, MouseDeviceSlot, MoveLayoutSlots,
 };
 use crate::game_hooks::{apply_turn_delta, feed, key_down, key_up};
 use crate::manager_mod::ManagerMod;
@@ -35,13 +37,17 @@ use crate::traits::GameCalls;
 use crate::types::{GameSlot, HookGroup, RenderRestore};
 
 /// The real calls: the `amm_host_*` API, the AMML loader, the overlay, the window, and the game through the
-/// vtable slots `GameSlots` read at enable.
+/// vtable slots `GameSlots` read at enable. The move layout `MoveLayoutSlots` and the mouse device
+/// `MouseDeviceSlot` read at enable are kept for the lifecycle.
 pub struct LiveCalls {
     api: Api,
     host: &'static ManagerOverlayHost,
     sink: &'static ManagerInputSink,
     hooks: GameHookSet,
     slots: GameSlots,
+    move_layout: Mutex<Option<MoveLayout>>,
+    // 0 while the mouse device entry did not resolve
+    mouse_device: AtomicUsize,
     overlay: Mutex<Option<Overlay<AmmlHookInstaller>>>,
 }
 
@@ -55,7 +61,16 @@ impl LiveCalls {
     const HUD_SLOTS: [GameSlot; 3] = [GameSlot::Options, GameSlot::SetHideGui, GameSlot::GetHideHud];
 
     pub fn new(api: Api, host: &'static ManagerOverlayHost, sink: &'static ManagerInputSink) -> Self {
-        Self { api, host, sink, hooks: GameHookSet::new(), slots: GameSlots::new(), overlay: Mutex::new(None) }
+        Self {
+            api,
+            host,
+            sink,
+            hooks: GameHookSet::new(),
+            slots: GameSlots::new(),
+            move_layout: Mutex::new(None),
+            mouse_device: AtomicUsize::new(0),
+            overlay: Mutex::new(None),
+        }
     }
 
     fn lock_overlay(&self) -> MutexGuard<'_, Option<Overlay<AmmlHookInstaller>>> {
@@ -121,11 +136,11 @@ impl GameCalls for LiveCalls {
         amm_host_key(vk, down, repeat, mods, now_ms).consume
     }
 
-    fn take_fake_keys(&self, out: &mut Vec<FakeKeyOp>) {
+    fn take_fake_keys(&self, feed_ready: bool, out: &mut Vec<FakeKeyOp>) {
         let mut batch = [AmmHostFakeKey { vk: 0, down: 0 }; Self::FAKE_KEY_BATCH];
         loop {
             // SAFETY: `batch` is a writable local with room for `FAKE_KEY_BATCH` entries
-            let taken = unsafe { amm_host_take_fake_keys(batch.as_mut_ptr(), batch.len()) };
+            let taken = unsafe { amm_host_take_fake_keys(feed_ready, batch.as_mut_ptr(), batch.len()) };
             out.extend(batch.iter().take(taken).map(|key| FakeKeyOp { vk: key.vk, down: key.down != 0 }));
             if taken < batch.len() {
                 return;
@@ -149,11 +164,11 @@ impl GameCalls for LiveCalls {
         }
     }
 
-    fn take_fake_pointer(&self, out: &mut Vec<PointerOp>) {
+    fn take_fake_pointer(&self, feed_ready: bool, out: &mut Vec<PointerOp>) {
         let mut batch = [AmmHostFakePointer { op: 0, value: 0 }; Self::FAKE_POINTER_BATCH];
         loop {
             // SAFETY: `batch` is a writable local with room for `FAKE_POINTER_BATCH` entries
-            let taken = unsafe { amm_host_take_fake_pointer(batch.as_mut_ptr(), batch.len()) };
+            let taken = unsafe { amm_host_take_fake_pointer(feed_ready, batch.as_mut_ptr(), batch.len()) };
             out.extend(batch.iter().take(taken).filter_map(|entry| PointerOpCodec::decode(entry.op, entry.value).ok()));
             if taken < batch.len() {
                 return;
@@ -249,6 +264,8 @@ impl GameCalls for LiveCalls {
     fn install_hooks(&self) -> Result<(), SdkError> {
         let loader = self.loader();
         self.slots.resolve(&loader)?;
+        *self.move_layout.lock().unwrap_or_else(PoisonError::into_inner) = MoveLayoutSlots::resolve(&loader);
+        self.mouse_device.store(MouseDeviceSlot::resolve(&loader).unwrap_or(0), Ordering::Relaxed);
         self.hooks.install(&loader, &ManagerMod::hooks())
     }
 
@@ -371,6 +388,31 @@ impl GameCalls for LiveCalls {
                 std::mem::transmute::<*const c_void, extern "C" fn(usize, u8)>(function)(options, u8::from(hide))
             };
         }
+    }
+
+    fn mouse_device(&self) -> Option<usize> {
+        match self.mouse_device.load(Ordering::Relaxed) {
+            0 => None,
+            device => Some(device),
+        }
+    }
+
+    fn move_layout(&self) -> Option<MoveLayout> {
+        *self.move_layout.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set_move_available(&self, available: bool) {
+        amm_host_set_move_available(available);
+    }
+
+    fn host_move(&self, player_ready: bool) -> Option<MoveIntent> {
+        let mut out = AmmHostMove { forward_milli: 0, left_milli: 0, flags: 0 };
+        // SAFETY: out is a writable local
+        let held = unsafe { amm_host_move_intent(player_ready, &mut out) };
+        if !held {
+            return None;
+        }
+        MoveIntentCodec::decode(out.forward_milli, out.left_milli, out.flags).ok()
     }
 
     fn log(&self, level: AmmlLogLevel, message: &str) {

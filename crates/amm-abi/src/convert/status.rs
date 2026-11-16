@@ -33,6 +33,9 @@ impl From<&ManagerError> for AmmStatus {
             ManagerError::RenderSizeClosed => AmmStatus::NotPermitted,
             ManagerError::InvalidArgument => AmmStatus::InvalidArgument,
             ManagerError::PointerQueueFull => AmmStatus::QueueFull,
+            ManagerError::Unsupported => AmmStatus::Unsupported,
+            ManagerError::NotReady => AmmStatus::NotReady,
+            ManagerError::KeyQueueFull => AmmStatus::Busy,
         }
     }
 }
@@ -81,6 +84,7 @@ impl TryFrom<i32> for AmmStatus {
             10 => Ok(AmmStatus::Unsupported),
             11 => Ok(AmmStatus::ManagerMissing),
             12 => Ok(AmmStatus::Busy),
+            13 => Ok(AmmStatus::NotReady),
             other => Err(other),
         }
     }

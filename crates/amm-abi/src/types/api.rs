@@ -8,8 +8,8 @@ use super::{
 /// The function table returned by `amm_get_api`. New functions are only added at the end, with a higher `abi_minor`.
 /// A client checks `size` before it calls a function added after its own minor version. The functions from
 /// `register` to `capture_stream_give_back` are part of 2.0; a function after it came in the later minor version
-/// its doc names (`watch_keys` and `send_key` are 2.1, `send_pointer` and `panel_open` are 2.2). Minor 2.3 adds no
-/// function: it adds the look-turn ops 5 and 6 to `send_pointer`.
+/// its doc names (`watch_keys` and `send_key` are 2.1, `send_pointer` and `panel_open` are 2.2, `send_move` is 2.4).
+/// Minor 2.3 adds no function: it adds the look-turn ops 5 and 6 to `send_pointer`.
 /// A null slot means the function is absent.
 ///
 /// All text is UTF-8 as a pointer and a length.
@@ -269,7 +269,10 @@ pub struct AmmApi {
     /// that the game sees as its own keyboard. Any other `down` value is `InvalidArgument`, as is a `vk` above 255.
     /// The mod needs an `Input` claim in its descriptor, else `NotPermitted`; so is any call while the manager panel
     /// is open, and a `down` of 1 while another mod holds an active `Input` lease. A `down` of 1 for a key the mod
-    /// already holds, or a `down` of 0 for a key it does not hold, is `Ok` and sends nothing. The manager lets go of
+    /// already holds, or a `down` of 0 for a key it does not hold, is `Ok` and sends nothing. Since 2.4, a `down` of 1
+    /// is `NotReady` while the manager does not yet know the game's keyboard controller, and `Busy` while the queue
+    /// of presses not yet fed to the game is full; nothing is queued then. A `down` of 0 is never refused for
+    /// these. The manager lets go of
     /// the keys a mod holds when it unregisters or is disabled, when the panel opens, when the game window loses
     /// focus and when the world is left; the mod, if still registered, then gets `FakeKeysReleased`. A handle that
     /// names no live registration is `UnknownHandle`.
@@ -292,14 +295,35 @@ pub struct AmmApi {
     /// the buttons a mod holds on the same events as its fake keys, and the mod, if still registered, then gets
     /// `FakeKeysReleased`. The manager queues at most 256 actions between game ticks: a full queue drops its oldest
     /// wheel turn, never a button change, and with no wheel turn to drop the call is `QueueFull` and changes
-    /// nothing; a look turn uses no queue room. A look turn sent while the game has no local player is dropped. An action sent before the game has fed any real mouse event is dropped, not kept for later. A
-    /// handle that names no live registration is `UnknownHandle`.
+    /// nothing; a look turn uses no queue room. A look turn sent while the game has no local player is dropped. Since 2.4, a button down or a wheel turn
+    /// is `NotReady` while the manager does not yet know the game's mouse device (a manager that has the
+    /// `MouseDevice.instance` game entry knows it from the start, otherwise from the first real mouse event), and
+    /// nothing is queued then; a button up and a look turn are never refused for it. A manager older than 2.4 drops
+    /// such an action instead, with `Ok`. A handle that names no live registration is `UnknownHandle`.
     pub send_pointer: Option<unsafe extern "C" fn(handle: AmmHandle, op: u32, value: i32) -> AmmStatus>,
     /// Since 2.2. Game thread. 1 while the manager panel is open, else 0. While it is open the manager refuses
     /// `send_key` and `send_pointer` and has let go of every fake key and button; a mod that drives the game's input
     /// reads this to stop as the person takes over, also when it held no key the panel could release. A handle that
     /// names no live registration, or a call from inside a frame callback, where the host is busy, is 0.
     pub panel_open: Option<unsafe extern "C" fn(handle: AmmHandle) -> u8>,
+    /// Since 2.4. Game thread. Holds a movement of the local player, with no keyboard: the manager writes it into
+    /// the game's own move input each game tick, so the game and a server see normal input. `forward_milli` and
+    /// `left_milli` are the forward and left axes in thousandths, each -1000 to 1000 (positive is forward and to
+    /// the left); a longer diagonal is held to the length of one full axis. `flags` holds jump (bit 0,
+    /// `AMM_MOVE_JUMP`), sneak (bit 1, `AMM_MOVE_SNEAK`) and sprint (bit 2, `AMM_MOVE_SPRINT`), each held while
+    /// set, whatever the player's toggle options say. An axis past 1000 either way, or any other flag bit, is
+    /// `InvalidArgument`. The intent stays until the mod sends another one; all zero is the clear, always `Ok`, and
+    /// the game's own keys work again on the next tick. Any other intent needs an active `Input` lease of the mod
+    /// and a closed panel, else `NotPermitted`; it is `Unsupported` when the game entries for movement did not
+    /// resolve, so the mod can fall back to `send_key`, and `NotReady` while the game has no local player in a
+    /// world. Nothing is written while a screen is open over play. A mod that sets an intent replaces the intent of
+    /// another mod, which gets `FakeKeysReleased`. The manager clears the intent, and the mod, if still
+    /// registered, gets `FakeKeysReleased`, when its `Input` lease ends, another mod gains `Input`, the panel opens,
+    /// the game window loses focus (unless the mod's `full_block` keeps the focus loss from the game), the world is
+    /// left, or the mod is disabled; it clears with no event when the mod unregisters. A handle that names no live
+    /// registration is `UnknownHandle`.
+    pub send_move:
+        Option<unsafe extern "C" fn(handle: AmmHandle, forward_milli: i32, left_milli: i32, flags: u32) -> AmmStatus>,
 }
 
 impl AbiSized for AmmApi {
@@ -343,6 +367,7 @@ impl AbiSized for AmmApi {
             send_key: None,
             send_pointer: None,
             panel_open: None,
+            send_move: None,
         }
     }
 }

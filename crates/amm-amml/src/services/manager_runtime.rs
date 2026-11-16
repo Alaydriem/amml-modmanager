@@ -41,13 +41,14 @@ impl ManagerRuntime {
     }
 
     /// `ClientInstance::update` of `client` ran: the host tick, the fake key presses and mouse actions mods queued,
-    /// the focus loss a full block kept from the game, the screen on top for the next host frame, then the mouse grab
-    /// and the HUD state the last host frame asked for.
+    /// the held move intent for the move detour, the focus loss a full block kept from the game, the screen on top
+    /// for the next host frame, then the mouse grab and the HUD state the last host frame asked for.
     pub fn tick(&self, client: usize) {
         let state = self.state;
         state.tick().tick(self.calls, client);
         state.fake_keys().flush(self.calls);
         state.fake_pointer().flush(self.calls, client);
+        state.fake_move().publish(self.calls, client);
         self.replay_focus_loss();
         state.menu().observe(self.calls, client);
         state.grab().apply(self.calls, state.latch(), state.frame(), client);
@@ -79,6 +80,11 @@ impl ManagerRuntime {
     pub fn grab_called(&self, game: usize) -> bool {
         self.state.grab().keep_game(game);
         MouseGrab::blocks_grab(self.state.frame())
+    }
+
+    /// The game filled the `RawMoveInputComponent` at `raw`: the held move intent is written into it.
+    pub fn move_input(&self, raw: usize) {
+        self.state.fake_move().write(raw);
     }
 
     /// The player's own look turn is dropped.

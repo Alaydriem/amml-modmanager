@@ -14,6 +14,15 @@ amml_detour!(pub mod key_down(this: usize, key: i32, origin: i32) -> () |origina
     }
 });
 
+// void HIDControllerGameCoreDesktop::update(): the game updates its keyboard controller, so the manager learns
+// the controller with no real key press
+amml_detour!(pub mod controller_update(this: usize) -> () |original| {
+    original(this);
+    if let Some(runtime) = ManagerRuntime::get() {
+        runtime.state().fake_keys().note_controller(this);
+    }
+});
+
 // void HIDControllerGameCoreDesktop::onKeyUp(int keyCode)
 amml_detour!(pub mod key_up(this: usize, key: i32) -> () |original| {
     let consumed = ManagerRuntime::get().is_some_and(|runtime| runtime.key(key, false));

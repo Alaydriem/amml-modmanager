@@ -4,6 +4,7 @@ mod event;
 mod frame;
 mod log_level;
 mod mesh;
+mod move_intent;
 mod pointer_op;
 mod screenshot_layers;
 mod status;
