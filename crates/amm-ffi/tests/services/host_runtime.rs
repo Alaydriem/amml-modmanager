@@ -1,4 +1,3 @@
-use amm_abi::types::AmmCallbacks;
 use amm_core::structs::descriptor::Capability;
 use amm_core::structs::input::InputEvent;
 use amm_core::structs::registry::ModIndex;
@@ -10,27 +9,21 @@ use amm_ui::model::PanelAction;
 
 use crate::support::Descriptors;
 
-const NO_CALLBACKS: AmmCallbacks = AmmCallbacks {
-    size: size_of::<AmmCallbacks>() as u32,
-    user: std::ptr::null_mut(),
-    frame: None,
-    textures_lost: None,
-};
 const SCHEMA: &str = "section \"keys\" {\n  title = \"Keys\"\n  field \"keys.toggle\" {\n    label = \"Toggle\"\n    \
                       kind = \"chord\"\n    default = \"Ctrl+L\"\n    apply = \"Live\"\n  }\n}\n";
 
 #[test]
 fn a_full_io_queue_shows_save_failed_and_keeps_the_write_to_try_again() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let manager_dir = dir.path().join("manager");
+    let manager_dir = dir.path().join("mods").join("@amml").join("modmanager").join("config");
     std::fs::create_dir_all(&manager_dir).expect("manager folder");
     std::fs::write(manager_dir.join("config.hcl"), "budgets {\n  io_queue = 1\n}\n").expect("manager config");
     let mut runtime = HostRuntime::new(manager_dir, dir.path().join("game"), "test".into()).expect("runtime starts");
     let mut indices = Vec::new();
     for id in ["saver", "saver-two"] {
-        let mod_dir = dir.path().join("mods").join(id).join("config");
+        let mod_dir = dir.path().join("mods").join("@test").join(id).join("config");
         let descriptor = Descriptors::with_claims(id, &[("Overlay", "Shared")], SCHEMA);
-        let handle = runtime.register(descriptor.as_bytes(), &mod_dir, NO_CALLBACKS).expect("registered");
+        let handle = runtime.register(descriptor.as_bytes(), &mod_dir).expect("registered");
         indices.push(ModIndex(handle.slot as u8));
     }
     runtime.tick(1000);
@@ -53,14 +46,18 @@ fn a_full_io_queue_shows_save_failed_and_keeps_the_write_to_try_again() {
 #[test]
 fn a_mod_config_that_cannot_be_kept_as_invalid_is_never_overwritten() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut runtime =
-        HostRuntime::new(dir.path().join("manager"), dir.path().join("game"), "test".into()).expect("runtime starts");
-    let mod_dir = dir.path().join("mods").join("keeper").join("config");
+    let mut runtime = HostRuntime::new(
+        dir.path().join("mods").join("@amml").join("modmanager").join("config"),
+        dir.path().join("game"),
+        "test".into(),
+    )
+    .expect("runtime starts");
+    let mod_dir = dir.path().join("mods").join("@test").join("keeper").join("config");
     std::fs::create_dir_all(mod_dir.join("config.hcl.invalid")).expect("blocked copy");
     std::fs::write(mod_dir.join("config.hcl"), "keys { toggle = = }\n").expect("hand edit");
     let descriptor = Descriptors::with_claims("keeper", &[("Overlay", "Shared")], SCHEMA);
 
-    let handle = runtime.register(descriptor.as_bytes(), &mod_dir, NO_CALLBACKS).expect("registered");
+    let handle = runtime.register(descriptor.as_bytes(), &mod_dir).expect("registered");
     let document = runtime.manager().document(ModIndex(handle.slot as u8)).map(|document| document.text());
     runtime.tick(u64::MAX / 2);
     runtime.shutdown();
@@ -73,13 +70,17 @@ fn a_mod_config_that_cannot_be_kept_as_invalid_is_never_overwritten() {
 fn a_config_that_could_not_be_read_is_never_written() {
     let dir = tempfile::tempdir().expect("temp dir");
     let game = dir.path().join("game");
-    let mut runtime =
-        HostRuntime::new(dir.path().join("manager"), game.clone(), "test".into()).expect("runtime starts");
-    let mod_dir = dir.path().join("mods").join("keeper").join("config");
+    let mut runtime = HostRuntime::new(
+        dir.path().join("mods").join("@amml").join("modmanager").join("config"),
+        game.clone(),
+        "test".into(),
+    )
+    .expect("runtime starts");
+    let mod_dir = dir.path().join("mods").join("@test").join("keeper").join("config");
     std::fs::create_dir_all(mod_dir.join("config.hcl.invalid")).expect("blocked copy");
     std::fs::write(mod_dir.join("config.hcl"), "keys { toggle = = }\n").expect("hand edit");
     let descriptor = Descriptors::with_claims("keeper", &[("Overlay", "Shared")], SCHEMA);
-    let handle = runtime.register(descriptor.as_bytes(), &mod_dir, NO_CALLBACKS).expect("registered");
+    let handle = runtime.register(descriptor.as_bytes(), &mod_dir).expect("registered");
     let index = ModIndex(handle.slot as u8);
     runtime.tick(1000);
     assert!(runtime.manager().toasts().visible(0, u64::MAX).next().is_none());
@@ -106,11 +107,15 @@ fn a_config_that_could_not_be_read_is_never_written() {
 #[test]
 fn a_mod_registered_without_a_frame_callback_draws_no_layer_and_counts_no_failure() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let mut runtime =
-        HostRuntime::new(dir.path().join("manager"), dir.path().join("game"), "test".into()).expect("runtime starts");
-    let mod_dir = dir.path().join("mods").join("quiet").join("config");
+    let mut runtime = HostRuntime::new(
+        dir.path().join("mods").join("@amml").join("modmanager").join("config"),
+        dir.path().join("game"),
+        "test".into(),
+    )
+    .expect("runtime starts");
+    let mod_dir = dir.path().join("mods").join("@test").join("quiet").join("config");
     let descriptor = Descriptors::with_claims("quiet", &[("Hud", "Shared")], "");
-    let handle = runtime.register(descriptor.as_bytes(), &mod_dir, NO_CALLBACKS).expect("registered");
+    let handle = runtime.register(descriptor.as_bytes(), &mod_dir).expect("registered");
     runtime.acquire(handle, Capability::Hud).expect("acquired");
 
     let input = AmmHostFrameInput {
@@ -149,7 +154,12 @@ fn creating_a_host_never_replaces_an_open_log_file() {
     let dir = tempfile::tempdir().expect("temp dir");
     let game = dir.path().join("game");
 
-    let runtime = HostRuntime::new(dir.path().join("manager"), game.clone(), "test".into()).expect("runtime starts");
+    let runtime = HostRuntime::new(
+        dir.path().join("mods").join("@amml").join("modmanager").join("config"),
+        game.clone(),
+        "test".into(),
+    )
+    .expect("runtime starts");
     let replaced = LogBridge::current().map(LogBridge::replaced_sinks);
     runtime.shutdown();
 
@@ -163,8 +173,12 @@ fn a_host_made_again_after_shutdown_logs_to_the_same_manager_file() {
     let game = dir.path().join("game");
 
     for _ in 0..2 {
-        let runtime =
-            HostRuntime::new(dir.path().join("manager"), game.clone(), "test".into()).expect("runtime starts");
+        let runtime = HostRuntime::new(
+            dir.path().join("mods").join("@amml").join("modmanager").join("config"),
+            game.clone(),
+            "test".into(),
+        )
+        .expect("runtime starts");
         runtime.shutdown();
     }
 

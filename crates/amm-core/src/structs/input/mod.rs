@@ -1,25 +1,11 @@
-pub mod fake_key_op;
 pub mod game_viewport;
 pub mod input_event;
 pub mod modifiers;
-pub mod move_intent;
-pub mod move_layout;
-pub mod move_write;
-pub mod pointer_button;
-pub mod pointer_op;
 pub mod route_context;
 pub mod route_decision;
-pub mod turn_axis;
 
-pub use fake_key_op::FakeKeyOp;
 pub use game_viewport::GameViewport;
 pub use input_event::InputEvent;
 pub use modifiers::Modifiers;
-pub use move_intent::MoveIntent;
-pub use move_layout::MoveLayout;
-pub use move_write::MoveWrite;
-pub use pointer_button::PointerButton;
-pub use pointer_op::PointerOp;
 pub use route_context::RouteContext;
 pub use route_decision::RouteDecision;
-pub use turn_axis::TurnAxis;

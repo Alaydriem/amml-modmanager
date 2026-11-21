@@ -2,13 +2,13 @@ use amm_abi::types::{AmmEvent, AmmHandle};
 
 use crate::services::{Boundary, HostCell};
 
-/// Table `poll_events`. A stale handle or a null buffer drains nothing.
+/// Core table `poll_events`. A stale handle, a null buffer or a disabled manager drains nothing.
 ///
 /// # Safety
 ///
 /// `out_buf` is null or has room for `capacity` events, writable for the call.
 pub unsafe extern "C" fn amm_poll_events(handle: AmmHandle, out_buf: *mut AmmEvent, capacity: usize) -> usize {
-    let result = Boundary::guard(|| {
+    let result = Boundary::table(|| {
         if capacity == 0 {
             return Ok(0);
         }

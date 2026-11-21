@@ -1,4 +1,4 @@
-use amm_abi::types::{AMM_ABI_MAJOR, AmmCapability, AmmHandle, AmmStatus};
+use amm_abi::types::{AmmCapability, AmmHandle, AmmStatus};
 
 use amm_ffi::host::amm_host_game_point;
 
@@ -8,7 +8,7 @@ struct PictureRig;
 
 impl PictureRig {
     fn set_viewport(handle: AmmHandle, rect: Option<[f32; 4]>) -> AmmStatus {
-        let call = TestHost::api().set_game_viewport.unwrap_or_else(|| panic!("set_game_viewport"));
+        let call = TestHost::layers_table().set_game_viewport.unwrap_or_else(|| panic!("set_game_viewport"));
         let pointer = rect.as_ref().map_or(std::ptr::null(), |rect| rect as *const [f32; 4]);
         // SAFETY: the rect lives for the call, or the pointer is null
         unsafe { call(handle, pointer) }
@@ -30,7 +30,7 @@ impl PictureRig {
     }
 
     fn game_picture(handle: AmmHandle) -> (AmmStatus, u32, u32) {
-        let call = TestHost::api().game_picture.unwrap_or_else(|| panic!("game_picture"));
+        let call = TestHost::layers_table().game_picture.unwrap_or_else(|| panic!("game_picture"));
         let (mut width, mut height) = (7, 7);
         // SAFETY: both out pointers live for the call
         let status = unsafe { call(handle, &mut width, &mut height) };
@@ -71,7 +71,7 @@ fn a_null_out_pointer_is_null_pointer() {
     let host = TestHost::new();
     let client = TestClient::register(&host, &Descriptors::overlay("picture-null"), TestMesh::triangle());
     client.acquire(AmmCapability::Overlay);
-    let call = TestHost::api().game_picture.unwrap_or_else(|| panic!("game_picture"));
+    let call = TestHost::layers_table().game_picture.unwrap_or_else(|| panic!("game_picture"));
     let mut height = 0;
 
     // SAFETY: a null pointer is refused before any write
@@ -85,15 +85,6 @@ fn a_stale_handle_is_unknown() {
     let _host = TestHost::new();
 
     assert_eq!(PictureRig::game_picture(AmmHandle { slot: 9, generation: 99 }).0, AmmStatus::UnknownHandle);
-}
-
-#[test]
-fn the_game_picture_slot_is_filled() {
-    let table = amm_ffi::api::amm_api_for(AMM_ABI_MAJOR);
-    // SAFETY: a non-null table is the manager's static table
-    let api = unsafe { table.as_ref() }.unwrap_or_else(|| panic!("table"));
-
-    assert!(api.game_picture.is_some());
 }
 
 #[test]

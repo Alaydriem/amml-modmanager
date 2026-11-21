@@ -19,8 +19,9 @@ workspace = true
 amm-abi.workspace = true
 amm-core = { workspace = true, features = ["egui"] }
 amm-ffi.workspace = true
-amm-client.workspace = true
+amm-client = { workspace = true, features = ["test-support"] }
 amm-ui.workspace = true
+amml-api = { workspace = true, features = ["test"] }
 curia.workspace = true
 chrono.workspace = true
 egui.workspace = true

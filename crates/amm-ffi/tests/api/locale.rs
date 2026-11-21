@@ -44,7 +44,7 @@ fn host_applies_a_language() {
 
 // calls the table `locale` with a buffer of `cap` bytes; returns the length and the bytes it wrote
 fn read_locale(handle: AmmHandle, cap: usize) -> (u32, Vec<u8>) {
-    let locale = TestHost::api().locale.unwrap_or_else(|| panic!("locale"));
+    let locale = TestHost::core_table().locale.unwrap_or_else(|| panic!("locale"));
     let mut buffer = vec![0u8; cap];
     let pointer = if cap == 0 { std::ptr::null_mut() } else { buffer.as_mut_ptr() };
     // SAFETY: the buffer holds `cap` writable bytes for the call, or is null with `cap` 0

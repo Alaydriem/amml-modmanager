@@ -2,7 +2,7 @@ use amml_abi::ModId;
 use serde::Deserialize;
 
 use crate::structs::descriptor::raw::RawDescriptor;
-use crate::structs::descriptor::{Capability, Claim, KeybindDecl, SettingsSection};
+use crate::structs::descriptor::{Capability, Claim, InputClaim, KeybindDecl, SettingsSection};
 
 /// A mod's registration. `texture_budget_mb` (MiB) and `texture_budget_count` are the texture budget the mod asks
 /// for; `None` asks for the manager's default.
@@ -27,6 +27,18 @@ impl Descriptor {
     /// The mod id, `@<namespace>/<name>`.
     pub fn id(&self) -> String {
         ModId::format(&self.namespace, &self.name)
+    }
+
+    /// The `Input` claim with the descriptor's `input_passthrough` keys, or `None` when the mod claims no input.
+    pub fn input_claim(&self) -> Option<InputClaim> {
+        let claim = self.claims.iter().find(|claim| claim.capability == Capability::Input)?;
+        Some(InputClaim {
+            mode: claim.mode,
+            block_player_turn: claim.block_player_turn,
+            pass_pointer_motion: claim.pass_pointer_motion,
+            full_block: claim.full_block,
+            passthrough: self.input_passthrough.clone(),
+        })
     }
 }
 

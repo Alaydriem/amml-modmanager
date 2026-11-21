@@ -28,6 +28,8 @@ pub enum AmmId {
     Toasts,
     /// The control of the setting field at this position on a mod's General tab.
     Setting(usize),
+    /// Where the header drew the panel's close button, kept in the temp data for the host.
+    CloseButton,
 }
 
 impl Hash for AmmId {

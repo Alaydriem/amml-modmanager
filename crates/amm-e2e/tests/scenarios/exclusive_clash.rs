@@ -34,17 +34,6 @@ fn each_exclusive_resolution_gives_its_outcome_and_the_loser_is_revoked() {
     assert_eq!(alpha.holder(Capability::Camera).as_deref(), Some("@test/beta"));
     assert!(beta.drain().iter().all(|event| !matches!(event, ModEvent::Revoked { .. })));
 
-    assert_eq!(beta.acquire(Capability::Input), AcquireOutcome::Granted);
-    beta.drain();
-    alpha.drain();
-    let prefer_alpha = alpha.acquire(Capability::Input);
-    let revoked = beta.drain();
-    let granted = alpha.drain();
-    assert_eq!(prefer_alpha, AcquireOutcome::Preempted);
-    assert_eq!(revoked, vec![ModEvent::Revoked { capability: Capability::Input, by: ModIndex(0) }]);
-    assert_eq!(granted, vec![ModEvent::Granted(Capability::Input)]);
-    assert_eq!(beta.holder(Capability::Input).as_deref(), Some("@test/alpha"));
-
     assert_eq!(alpha.acquire(Capability::Overlay), AcquireOutcome::Granted);
     alpha.drain();
     beta.drain();

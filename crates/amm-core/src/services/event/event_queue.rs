@@ -1,14 +1,11 @@
 use crate::structs::event::{KeybindPhase, ModEvent};
 
-/// A fixed ring of events for one mod. The bound is `capacity`. When the ring is full, `push` makes
-/// room in this order: (1) merge the two oldest adjacent `PointerDelta` events (no event is lost, so it
-/// is not counted as a drop); (2) drop the oldest `Keybind` with phase `Pressed` or `Repeat`; (3) drop the
-/// oldest `Wheel`, then the oldest `Key` with `down: true`. A key-up, a button-up, a keybind release and a
-/// lease, enable or settings event is never dropped for a lower-ranked event (see `ModEvent::is_protected`).
-/// If none of those exist, an unprotected new event is dropped. A protected new event then drops the oldest
-/// button-down `PointerButton`, then the oldest unprotected event. A queue full of protected events drops
-/// the new event, which is the only way to keep the bound. A mod can see a key-up whose key-down was dropped
-/// when the queue was full, and must treat it as a no-op.
+/// A fixed ring of events for one mod. The bound is `capacity`. When the ring is full, `push` makes room by dropping
+/// the oldest `Keybind` with phase `Pressed` or `Repeat`. A keybind release and a lease, enable, settings, menu entry
+/// or language event is never dropped for it (see `ModEvent::is_protected`). If no such keybind is queued, an
+/// unprotected new event is dropped, and a protected new event drops the oldest unprotected event. A queue full of
+/// protected events drops the new event, which is the only way to keep the bound. A mod can see a keybind release
+/// whose press was dropped when the queue was full, and must treat it as a no-op.
 pub struct EventQueue {
     slots: Vec<ModEvent>,
     head: usize,
@@ -79,24 +76,6 @@ impl EventQueue {
         (0..self.len).find(|logical| matches(&self.slots[self.slot(*logical)]))
     }
 
-    fn merge_oldest_deltas(&mut self) -> bool {
-        let adjacent = (0..self.len.saturating_sub(1)).find_map(|i| {
-            match (self.slots[self.slot(i)], self.slots[self.slot(i + 1)]) {
-                (ModEvent::PointerDelta { dx: ax, dy: ay }, ModEvent::PointerDelta { dx: bx, dy: by }) => {
-                    Some((i, ax + bx, ay + by))
-                }
-                _ => None,
-            }
-        });
-        let Some((i, dx, dy)) = adjacent else {
-            return false;
-        };
-        let target = self.slot(i);
-        self.slots[target] = ModEvent::PointerDelta { dx, dy };
-        self.remove_at(i + 1);
-        true
-    }
-
     fn drop_oldest_where(&mut self, matches: impl Fn(&ModEvent) -> bool) -> bool {
         let Some(logical) = self.oldest_where(matches) else {
             return false;
@@ -107,21 +86,11 @@ impl EventQueue {
     }
 
     fn make_room(&mut self, incoming: &ModEvent) -> bool {
-        if self.merge_oldest_deltas() {
-            return true;
-        }
         let unreleased =
             |e: &ModEvent| matches!(e, ModEvent::Keybind { phase, .. } if *phase != KeybindPhase::Released);
-        if self.drop_oldest_where(unreleased)
-            || self.drop_oldest_where(|e| matches!(e, ModEvent::Wheel { .. }))
-            || self.drop_oldest_where(|e| matches!(e, ModEvent::Key { down: true, .. }))
-        {
+        if self.drop_oldest_where(unreleased) {
             return true;
         }
-        if !incoming.is_protected() {
-            return false;
-        }
-        self.drop_oldest_where(|e| matches!(e, ModEvent::PointerButton { down: true, .. }))
-            || self.drop_oldest_where(|e| !e.is_protected())
+        incoming.is_protected() && self.drop_oldest_where(|e| !e.is_protected())
     }
 }

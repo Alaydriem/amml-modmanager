@@ -2,10 +2,10 @@ use amm_core::structs::write::SaveStatus;
 use amml_i18n::text::{Args, Text, UserText};
 use amml_ui::icon::Icon;
 use amml_ui::widget::{Chip, ChipKind, ChipTone, IconButton, PageHeader, PageHeaderLead};
-use egui::Ui;
+use egui::{Id, Ui};
 
-use crate::AmmMessage;
 use crate::model::{PanelAction, PanelIntent, PanelModel};
+use crate::{AmmId, AmmMessage};
 
 /// The panel's top bar, the panel form of the page header: the studio name over "Mod Manager", the
 /// mod counts and the manager version, then the save status and close. Edits save on their own,
@@ -17,6 +17,11 @@ impl HeaderView {
     /// The bar's height, which does not change with its text.
     pub fn height() -> f32 {
         Self::bar().height()
+    }
+
+    /// The key of the egui temp data where `show` keeps the rect of the close button, in points.
+    pub fn close_id() -> Id {
+        Id::unique(AmmId::CloseButton)
     }
 
     pub fn show(ui: &mut Ui, model: &PanelModel, out: &mut Vec<PanelIntent>) {
@@ -32,7 +37,9 @@ impl HeaderView {
         Self::bar()
             .meta(meta)
             .trailing(|ui| {
-                if IconButton::new(Icon::Close).show(ui).clicked() {
+                let close = IconButton::new(Icon::Close).show(ui);
+                ui.ctx().data_mut(|data| data.insert_temp(Self::close_id(), close.rect));
+                if close.clicked() {
                     out.push(PanelIntent::Action(PanelAction::Close));
                 }
                 if let Some(chip) = status {

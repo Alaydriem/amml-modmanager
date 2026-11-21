@@ -1,6 +1,7 @@
+use amm_abi::types::AmmStatus;
 use amm_abi::types::{AmmEvent, AmmEventKind};
 use amm_core::structs::descriptor::Capability;
-use amm_core::structs::event::{KeybindPhase, ModEvent};
+use amm_core::structs::event::{KeybindPhase, ModEvent, ReleaseReason};
 use amm_core::structs::registry::ModIndex;
 
 #[test]
@@ -13,15 +14,8 @@ fn every_event_kind_survives_core_to_abi_to_core() {
         ModEvent::WorldReloadApply,
         ModEvent::MenuEntryClicked { entry: 2 },
         ModEvent::LocaleChanged,
-        ModEvent::PointerButton { button: 2, down: true, x: -12.5, y: 400.25 },
-        ModEvent::PointerButton { button: 0, down: false, x: 0.0, y: 1.0 },
-        ModEvent::PointerDelta { dx: -3.0, dy: 4.5 },
-        ModEvent::Wheel { delta: -1.5 },
-        ModEvent::Key { vk: 0x4D, down: true, repeat: false },
-        ModEvent::Key { vk: 0x4D, down: true, repeat: true },
-        ModEvent::Key { vk: 0xFF, down: false, repeat: false },
     ];
-    for capability in Capability::ALL {
+    for capability in Capability::MANAGER {
         events.push(ModEvent::Granted(capability));
         events.push(ModEvent::Revoked { capability, by });
         events.push(ModEvent::Suspended { capability, by });
@@ -33,29 +27,48 @@ fn every_event_kind_survives_core_to_abi_to_core() {
     }
 
     for event in events {
-        let abi = AmmEvent::from(event);
+        let Ok(abi) = AmmEvent::try_from(event) else { panic!("{event:?} has no ABI kind") };
         assert_eq!(ModEvent::try_from(&abi), Ok(event), "{event:?}");
     }
 }
 
 #[test]
-fn fake_keys_released_round_trips() {
-    let abi = AmmEvent::from(ModEvent::FakeKeysReleased);
+fn an_input_capability_is_written_as_a_byte_no_reader_takes() {
+    let Ok(abi) = AmmEvent::try_from(ModEvent::Granted(Capability::Input)) else { panic!("no ABI kind") };
 
-    assert_eq!(abi.kind, AmmEventKind::FakeKeysReleased);
-    assert_eq!(ModEvent::try_from(&abi), Ok(ModEvent::FakeKeysReleased));
+    assert_eq!(abi.kind, AmmEventKind::Granted);
+    assert!(ModEvent::try_from(&abi).is_err());
 }
 
 #[test]
 fn an_unknown_capability_byte_is_rejected() {
-    let mut abi = AmmEvent::from(ModEvent::Granted(Capability::Camera));
+    let Ok(mut abi) = AmmEvent::try_from(ModEvent::Granted(Capability::Camera)) else { panic!("no ABI kind") };
     abi.capability = 200;
     assert!(ModEvent::try_from(&abi).is_err());
 }
 
 #[test]
 fn an_unknown_phase_byte_is_rejected() {
-    let mut abi = AmmEvent::from(ModEvent::Keybind { action: 1, phase: KeybindPhase::Pressed });
+    let Ok(mut abi) = AmmEvent::try_from(ModEvent::Keybind { action: 1, phase: KeybindPhase::Pressed }) else {
+        panic!("no ABI kind")
+    };
     abi.phase = 99;
     assert!(ModEvent::try_from(&abi).is_err());
+}
+
+#[test]
+fn the_loader_events_of_a_link_have_no_abi_kind() {
+    let events = [
+        ModEvent::InputLeaseSuspended,
+        ModEvent::InputLeaseResumed,
+        ModEvent::InputLeaseLost,
+        ModEvent::FakeKeysReleased { reason: ReleaseReason::FocusLost },
+        ModEvent::ScreenshotTaken { id: amml_api::ShotId(1), ok: true },
+        ModEvent::ScreenshotWritten { id: amml_api::ShotId(1), ok: false },
+        ModEvent::ManagerGone,
+    ];
+
+    for event in events {
+        assert_eq!(AmmEvent::try_from(event).err(), Some(AmmStatus::InvalidArgument), "{event:?}");
+    }
 }

@@ -1,11 +1,6 @@
-mod capture;
-mod frame_flow;
 mod game_picture;
 mod layer_renderer;
-mod overlay;
 mod pace_window;
-mod present_hooks;
-mod state_backup;
 mod support;
+mod surface_renderer;
 mod textures;
-mod wndproc;

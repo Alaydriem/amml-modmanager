@@ -1,173 +1,78 @@
-use std::ffi::c_void;
-
-use amml_sdk::{AmmlMod, Api, SdkError};
-use windows::Win32::Foundation::HMODULE;
-
-use crate::dup_guard::DupGuard;
-use crate::errors::DupError;
-use crate::game_hooks::{
-    apply_turn_delta, client_update, controller_update, extract_raw_hid_input, feed, gamepad_refresh, grab_mouse,
-    key_down, key_up, level_exit, player_loaded,
+use amml_api::amml_abi::{
+    ClientTick, FramePresent, FramePresented, KeyInput, ModsLoaded, MouseGrab, MouseInput, RenderDeviceReset, Shutdown,
+    SurfaceLost, SwapChainResize, SwapChainResized, WindowChanged, WindowChar, WindowCursor, WindowFocus,
+    WindowPointer, WindowSize, WorldJoined, WorldLeft,
 };
-use crate::paths::ManagerPaths;
-use crate::services::{LiveCalls, ManagerInputSink, ManagerOverlayHost, ManagerRuntime, ManagerState, MoveLayoutSlots};
-use crate::types::{HookGroup, HookSpec};
+use amml_api::{AmmlMod, ApiError, Area, Ctx, DisableCtx, Uses};
 
-/// The AMML entry point. Load checks that this copy is the module mods find and records the folders; it starts no
-/// thread. Enable starts the host, then the hooks and the overlay. Disable takes them down in the order of
-/// `ManagerLifecycle`.
+use crate::services::ManagerLifecycle;
+
+/// The AMML entry point. Load reads the folders; enable starts the host, provides the five tables and adds the
+/// listeners; disable takes them down in the order of `ManagerLifecycle`.
 pub struct ManagerMod;
 
 impl ManagerMod {
     /// The module string the loader knows this mod by: `@<NAMESPACE>/<NAME>`.
     pub const MODULE: &'static str = "@amml/modmanager";
-    pub const UPDATE: &'static str = "ClientInstance.update";
-    pub const PLAYER_LOADED: &'static str = "ClientInstance.onPlayerLoaded";
-    pub const LEVEL_EXIT: &'static str = "ClientExitLevel.hook";
-    pub const MOUSE_FEED: &'static str = "MouseDevice.feed";
-    pub const KEY_DOWN: &'static str = "HIDControllerGameCoreDesktop.onKeyDown";
-    pub const KEY_UP: &'static str = "HIDControllerGameCoreDesktop.onKeyUp";
-    pub const CONTROLLER_UPDATE: &'static str = "HIDControllerGameCoreDesktop.update";
-    pub const GRAB_MOUSE: &'static str = "MinecraftGame.grabMouse";
-    pub const TURN_DELTA: &'static str = "LocalPlayer.applyTurnDelta";
-    pub const GAMEPAD_REFRESH: &'static str = "GameControllerHandler_GameCore.refresh";
 
-    /// Every game hook, in install order; the tick goes in last.
-    pub fn hooks() -> [HookSpec; 11] {
-        [
-            HookSpec {
-                entry: Self::PLAYER_LOADED,
-                detour: player_loaded::detour as *const c_void,
-                original: player_loaded::GUARD.original(),
-                group: HookGroup::World,
-                required: false,
-                feature: "the world join event",
-            },
-            HookSpec {
-                entry: Self::LEVEL_EXIT,
-                detour: level_exit::detour as *const c_void,
-                original: level_exit::GUARD.original(),
-                group: HookGroup::World,
-                required: false,
-                feature: "the world exit event",
-            },
-            HookSpec {
-                entry: Self::MOUSE_FEED,
-                detour: feed::detour as *const c_void,
-                original: feed::GUARD.original(),
-                group: HookGroup::Input,
-                required: true,
-                feature: "the manager",
-            },
-            HookSpec {
-                entry: Self::KEY_DOWN,
-                detour: key_down::detour as *const c_void,
-                original: key_down::GUARD.original(),
-                group: HookGroup::Input,
-                required: true,
-                feature: "the manager",
-            },
-            HookSpec {
-                entry: Self::KEY_UP,
-                detour: key_up::detour as *const c_void,
-                original: key_up::GUARD.original(),
-                group: HookGroup::Input,
-                required: true,
-                feature: "the manager",
-            },
-            HookSpec {
-                entry: Self::CONTROLLER_UPDATE,
-                detour: controller_update::detour as *const c_void,
-                original: controller_update::GUARD.original(),
-                group: HookGroup::Input,
-                required: false,
-                feature: "fake keys before the first real key press",
-            },
-            HookSpec {
-                entry: Self::GAMEPAD_REFRESH,
-                detour: gamepad_refresh::detour as *const c_void,
-                original: gamepad_refresh::GUARD.original(),
-                group: HookGroup::Input,
-                required: false,
-                feature: "the gamepad block",
-            },
-            HookSpec {
-                entry: MoveLayoutSlots::HOOK,
-                detour: extract_raw_hid_input::detour as *const c_void,
-                original: extract_raw_hid_input::GUARD.original(),
-                group: HookGroup::Input,
-                required: false,
-                feature: "the move command",
-            },
-            HookSpec {
-                entry: Self::GRAB_MOUSE,
-                detour: grab_mouse::detour as *const c_void,
-                original: grab_mouse::GUARD.original(),
-                group: HookGroup::Grab,
-                required: true,
-                feature: "the manager",
-            },
-            HookSpec {
-                entry: Self::TURN_DELTA,
-                detour: apply_turn_delta::detour as *const c_void,
-                original: apply_turn_delta::GUARD.original(),
-                group: HookGroup::Turn,
-                required: false,
-                feature: "the look turn block",
-            },
-            HookSpec {
-                entry: Self::UPDATE,
-                detour: client_update::detour as *const c_void,
-                original: client_update::GUARD.original(),
-                group: HookGroup::Tick,
-                required: true,
-                feature: "the manager",
-            },
-        ]
-    }
-
-    /// Ok when `own` is the module mods find by name. Both `load` and `enable` ask: a C++ manager that loaded after
-    /// our `load` is seen at `enable`, because LeviLamina loads every mod before it enables one.
-    pub fn check_sole_copy(own: Result<HMODULE, DupError>) -> Result<(), SdkError> {
-        own.and_then(DupGuard::check).map_err(|error| SdkError::Mod(error.to_string()))
-    }
-
-    /// Runs `start` only when `own` is the sole manager copy.
-    pub fn enable_if_sole(
-        own: Result<HMODULE, DupError>,
-        start: impl FnOnce() -> Result<(), SdkError>,
-    ) -> Result<(), SdkError> {
-        Self::check_sole_copy(own)?;
-        start()
-    }
-
-    fn runtime() -> Result<&'static ManagerRuntime, SdkError> {
-        ManagerRuntime::get().ok_or_else(|| SdkError::Mod("load did not run".to_string()))
-    }
+    /// What the manager needs from the loader. `host`, `overlay` and `input` must be served; `hud` turns off one
+    /// flag write per missing area.
+    pub const USES: Uses = amml_api::amml_uses! {
+        feature "host" {
+            required ClientTick;
+            required WorldJoined;
+            required WorldLeft;
+            required ModsLoaded;
+            required area Area::CLIENT_READ;
+            optional Shutdown;
+            optional area Area::CLIENT_TOP_SCREEN;
+        }
+        feature "overlay" {
+            required FramePresent;
+            required SwapChainResize;
+            required SwapChainResized;
+            required SurfaceLost;
+            required WindowPointer;
+            required WindowChar;
+            required WindowFocus;
+            required WindowSize;
+            required WindowChanged;
+            required WindowCursor;
+            required area Area::WINDOW_READ;
+            required area Area::OVERLAY_SURFACE;
+            optional FramePresented;
+            optional RenderDeviceReset;
+            optional area Area::WINDOW_REQUEST_SIZE;
+        }
+        feature "input" {
+            required KeyInput;
+            required area Area::INPUT_LEASE;
+            optional MouseInput;
+            optional MouseGrab;
+        }
+        feature "hud" {
+            optional area Area::CLIENT_HUD;
+            optional area Area::CLIENT_MOUSE;
+        }
+    };
 }
 
 impl AmmlMod for ManagerMod {
     const NAMESPACE: &'static str = "amml";
     const NAME: &'static str = "modmanager";
+    const USES: Uses = ManagerMod::USES;
 
-    fn load(api: &Api) -> Result<(), SdkError> {
-        Self::check_sole_copy(DupGuard::own_module())?;
-        let paths = ManagerPaths::from_api(api, &Self::id())?;
-        let state = ManagerState::leaked();
-        let host = ManagerOverlayHost::leaked(state);
-        let sink = ManagerInputSink::leaked(state);
-        let calls: &'static LiveCalls = Box::leak(Box::new(LiveCalls::new(*api, host, sink)));
-        ManagerRuntime::install(ManagerRuntime::new(state, calls, paths));
-        Ok(())
+    fn load(ctx: &Ctx) -> Result<(), ApiError> {
+        ManagerLifecycle::load(ctx)
     }
 
-    fn enable(_api: &Api) -> Result<(), SdkError> {
-        Self::enable_if_sole(DupGuard::own_module(), || Self::runtime()?.enable())
+    fn enable(ctx: &Ctx) -> Result<(), ApiError> {
+        ManagerLifecycle::installed()?.enable(ctx)
     }
 
-    fn disable(_api: &Api) {
-        if let Some(runtime) = ManagerRuntime::get() {
-            runtime.disable();
+    fn disable(ctx: &Ctx, how: &DisableCtx) {
+        if let Ok(lifecycle) = ManagerLifecycle::installed() {
+            lifecycle.disable(ctx, how);
         }
     }
 }

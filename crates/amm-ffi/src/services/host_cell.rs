@@ -6,14 +6,16 @@ use amm_core::services::render::RenderSizeBook;
 use amm_core::structs::render::RenderSize;
 use arc_swap::ArcSwapOption;
 
-use super::{HostRuntime, HostShared, LogBridge, ReentryGuard};
+use super::{HostRuntime, HostShared, LogBridge, ReentryGuard, TableGate};
 use crate::types::{AmmHostConsoleCallback, AmmHostFrame, AmmHostFrameInput};
 
-/// The one runtime handle of the manager DLL: the host behind a lock, the state the render thread and `log`
-/// read without the lock, and the console callback of the host mod.
+/// The one runtime handle of the manager DLL: the host behind a lock, the state the render thread reads without the
+/// lock, the table gate of the last host (kept after the host stops, so a late table call gets `Disabled`), and the
+/// console callback of the host mod.
 pub struct HostCell {
     runtime: Mutex<Option<HostRuntime>>,
     shared: ArcSwapOption<HostShared>,
+    gate: ArcSwapOption<TableGate>,
     console: Mutex<Option<AmmHostConsoleCallback>>,
 }
 
@@ -23,11 +25,12 @@ impl HostCell {
         CELL.get_or_init(|| Self {
             runtime: Mutex::new(None),
             shared: ArcSwapOption::empty(),
+            gate: ArcSwapOption::empty(),
             console: Mutex::new(None),
         })
     }
 
-    /// Starts the host. A host that already runs is kept.
+    /// Starts the host, with its tables open. A host that already runs is kept.
     pub fn create(&self, config_dir: PathBuf, game_dir: PathBuf, version: String) -> Result<(), AmmStatus> {
         let _inside = ReentryGuard::enter().ok_or(AmmStatus::NotPermitted)?;
         let mut runtime = self.lock();
@@ -38,6 +41,7 @@ impl HostCell {
         }
         let created = HostRuntime::new(config_dir, game_dir, version).map_err(|error| AmmStatus::from(&error))?;
         self.shared.store(Some(Arc::clone(created.shared())));
+        self.gate.store(Some(Arc::clone(created.table_gate())));
         *runtime = Some(created);
         Ok(())
     }
@@ -65,13 +69,19 @@ impl HostCell {
         result
     }
 
+    /// True once the last host closed its tables (`HostRuntime::disable_tables`): every table function then answers
+    /// `Disabled`. False before the first host. It reads the lock-free state only.
+    pub fn tables_closed(&self) -> bool {
+        self.gate.load().as_ref().is_some_and(|gate| gate.is_closed())
+    }
+
     /// The lock-free host state, while a host runs.
     pub fn shared(&self) -> Option<Arc<HostShared>> {
         self.shared.load_full()
     }
 
-    /// Composes one Present. With no layer, no toast, the panel closed, no menu button to show or take away, no
-    /// capture in flight and no render size work it answers from the lock-free state.
+    /// Composes one Present. With no layer, no toast, the panel closed, no menu button to show or take away and no
+    /// render size work it answers from the lock-free state.
     pub fn frame(&self, input: &AmmHostFrameInput) -> Result<AmmHostFrame, AmmStatus> {
         {
             let shared = self.shared.load();
@@ -79,11 +89,7 @@ impl HostCell {
             shared.set_back_buffer(RenderSize::new(input.width, input.height), input.format);
             let snapshot = shared.snapshot().load();
             let button = snapshot.menu_button && (input.menu_screen != 0 || shared.menu_button_placed());
-            let idle = snapshot.layers.is_empty()
-                && !snapshot.panel_open
-                && !button
-                && !shared.capturing()
-                && !shared.render_size_busy();
+            let idle = snapshot.layers.is_empty() && !snapshot.panel_open && !button && !shared.render_size_busy();
             if idle && !shared.toast_visible(input.now_ms) {
                 return Ok(AmmHostFrame {
                     freed_owners: shared.take_freed(),
@@ -120,18 +126,6 @@ impl HostCell {
         {
             shared.mark_window_changed();
         }
-    }
-
-    /// True while an active Input holder asks for the player's own turn to be blocked. It reads the lock-free
-    /// state only, so the game thread never waits on the host lock; false without a host.
-    pub fn blocks_player_turn(&self) -> bool {
-        self.shared.load().as_ref().is_some_and(|shared| shared.blocks_player_turn())
-    }
-
-    /// True while the active exclusive Input holder has a `full_block` claim. It reads the lock-free state only, so
-    /// the thread that polls the gamepad never waits on the host lock; false without a host.
-    pub fn blocks_gamepad(&self) -> bool {
-        self.shared.load().as_ref().is_some_and(|shared| shared.blocks_gamepad())
     }
 
     pub fn set_console(&self, callback: Option<AmmHostConsoleCallback>) {

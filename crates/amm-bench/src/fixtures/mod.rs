@@ -1,7 +1,6 @@
 pub mod bench_host;
-pub mod capture_rig;
+pub mod bench_loader;
 pub mod chord_table;
-pub mod client_rect_probe;
 pub mod compose_mode;
 pub mod compose_rig;
 pub mod demo_sized_handler;
@@ -15,12 +14,10 @@ pub mod latency_report;
 pub mod panel_rig;
 pub mod rect_handler;
 pub mod route_latency;
-pub mod stream_rig;
 
 pub use bench_host::BenchHost;
-pub use capture_rig::CaptureRig;
+pub use bench_loader::BenchLoader;
 pub use chord_table::ChordTable;
-pub use client_rect_probe::ClientRectProbe;
 pub use compose_mode::ComposeMode;
 pub use compose_rig::ComposeRig;
 pub use demo_sized_handler::DemoSizedHandler;
@@ -34,4 +31,3 @@ pub use latency_report::LatencyReport;
 pub use panel_rig::PanelRig;
 pub use rect_handler::RectHandler;
 pub use route_latency::{RouteLatency, RouteRun};
-pub use stream_rig::StreamRig;

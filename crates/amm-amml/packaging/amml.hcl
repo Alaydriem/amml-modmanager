@@ -1,43 +1,130 @@
 namespace   = "amml"
 name        = "modmanager"
 entry       = "amml_modmanager.dll"
-api_version = 2
-amml_version = "26.60.6"
-entries = [
-  # required: the manager refuses to enable without them
-  "ClientInstance.update",
-  "MouseDevice.feed",
-  "HIDControllerGameCoreDesktop.onKeyDown",
-  "HIDControllerGameCoreDesktop.onKeyUp",
-  "MinecraftGame.grabMouse",
-  "IMinecraftGame.releaseMouse",
-  "IMinecraftGame.grabMouse",
-  "ClientInstance.getLocalPlayer",
-  "ClientInstance.isWorldActive",
-  "ClientInstance.isShowingMenu",
-  # optional: each one missing turns off only its own feature
-  "LocalPlayer.applyTurnDelta",
-  "MouseDevice.instance",
-  "HIDControllerGameCoreDesktop.update",
-  "GameControllerHandler_GameCore.refresh",
-  "ClientInstance.onPlayerLoaded",
-  "ClientExitLevel.hook",
-  "ClientInstance.getTopScreenName",
-  "ClientInstance.getOptions",
-  "IOptionRegistry.setHideGUI",
-  "IOptionRegistry.getHideHud",
-  "ClientInputUpdateSystem.extractRawHIDInput",
-  "RawMoveInputComponent.mInputState",
-  "RawMoveInputComponent.mRawMove",
-  "MoveInputState.mAnalogMoveVector",
-  "MoveInputState.maskSneakTest",
-  "MoveInputState.maskJumpDown",
-  "MoveInputState.bitSprintDown",
-  "MoveInputState.bitUp",
-  "MoveInputState.bitDown",
-  "MoveInputState.bitLeft",
-  "MoveInputState.bitRight",
-]
+api_version = 3
+
+uses {
+  feature "host" {
+    event "client.tick" {
+      version  = 1
+      required = true
+    }
+    event "world.joined" {
+      version  = 1
+      required = true
+    }
+    event "world.left" {
+      version  = 1
+      required = true
+    }
+    event "mods.loaded" {
+      version  = 1
+      required = true
+    }
+    area "client.read" {
+      version  = 1
+      required = true
+    }
+    event "loader.shutdown" {
+      version  = 1
+      required = false
+    }
+    area "client.top_screen" {
+      version  = 2
+      required = false
+    }
+  }
+  feature "overlay" {
+    event "overlay.frame_present" {
+      version  = 1
+      required = true
+    }
+    event "overlay.swap_chain_resize" {
+      version  = 1
+      required = true
+    }
+    event "overlay.swap_chain_resized" {
+      version  = 1
+      required = true
+    }
+    event "overlay.surface_lost" {
+      version  = 1
+      required = true
+    }
+    event "window.pointer" {
+      version  = 1
+      required = true
+    }
+    event "window.char" {
+      version  = 1
+      required = true
+    }
+    event "window.focus" {
+      version  = 1
+      required = true
+    }
+    event "window.size" {
+      version  = 1
+      required = true
+    }
+    event "window.changed" {
+      version  = 1
+      required = true
+    }
+    event "window.cursor" {
+      version  = 1
+      required = true
+    }
+    area "window.read" {
+      version  = 1
+      required = true
+    }
+    area "overlay.surface" {
+      version  = 1
+      required = true
+    }
+    event "overlay.frame_presented" {
+      version  = 1
+      required = false
+    }
+    event "overlay.render_device_reset" {
+      version  = 1
+      required = false
+    }
+    area "window.request_size" {
+      version  = 1
+      required = false
+    }
+  }
+  feature "input" {
+    event "input.key" {
+      version  = 1
+      required = true
+    }
+    area "input.lease" {
+      version  = 1
+      required = true
+    }
+    event "input.mouse" {
+      version  = 1
+      required = false
+    }
+    event "client.mouse_grab" {
+      version  = 1
+      required = false
+    }
+  }
+  feature "hud" {
+    area "client.hud" {
+      version  = 1
+      required = false
+    }
+    area "client.mouse" {
+      version  = 1
+      required = false
+    }
+  }
+}
 
 listing {
   title       = "Alaydriem's Mod Manager"

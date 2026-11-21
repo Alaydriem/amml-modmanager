@@ -2,41 +2,30 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use amm_abi::types::{
-    AMM_ABI_MAJOR, AMM_ABI_MINOR, AmmAcquireOutcome, AmmAcquireResult, AmmApi, AmmCallbacks, AmmCapability, AmmHandle,
-    AmmLogLevel, AmmStatus,
-};
-use amm_ffi::api::amm_api_for;
+use amm_abi::types::{AMM_ABI_MINOR, AmmAcquireOutcome, AmmAcquireResult, AmmCapability, AmmHandle, AmmStatus};
 use amm_ffi::host::amm_host_textures_lost;
 
 use crate::support::{Descriptors, TestClient, TestHost, TestMesh};
 
-const NO_CALLBACKS: AmmCallbacks = AmmCallbacks {
-    size: size_of::<AmmCallbacks>() as u32,
-    user: std::ptr::null_mut(),
-    frame: None,
-    textures_lost: None,
-};
 const FAILURE_LIMIT: u32 = 30;
 
-const ABSOLUTE_DIR: &str = if cfg!(windows) { r"C:\amm-test\config" } else { "/amm-test/config" };
-
-fn register_raw(text: *const u8, len: usize) -> AmmStatus {
-    register_in(text, len, ABSOLUTE_DIR)
-}
+// a config folder for a call with no host, so the folder rules are never reached
+const ABSOLUTE_DIR: &str = if cfg!(windows) { r"C:\amm-test\mods\@test\early\config" } else { "/amm-test/config" };
 
 fn register_in(text: *const u8, len: usize, config_dir: &str) -> AmmStatus {
     let mut handle = AmmHandle { slot: 0, generation: 0 };
-    let register = TestHost::api().register.unwrap_or_else(|| panic!("register"));
-    // SAFETY: the text is null or lives for the call, and the folder, callbacks and handle live for the call
-    unsafe { register(text, len, config_dir.as_ptr(), config_dir.len(), &NO_CALLBACKS, &mut handle) }
+    let register = TestHost::core_table().register.unwrap_or_else(|| panic!("register"));
+    // SAFETY: the text is null or lives for the call, and the folder and handle live for the call
+    unsafe { register(text, len, config_dir.as_ptr(), config_dir.len(), &mut handle) }
 }
 
 fn config_document(handle: AmmHandle) -> Result<String, AmmStatus> {
     let (mut ptr, mut len) = (std::ptr::null(), 0);
     // SAFETY: both out pointers live for the call
     let status = unsafe {
-        TestHost::api().config_document.unwrap_or_else(|| panic!("config_document"))(handle, &mut ptr, &mut len)
+        TestHost::settings_table().config_document.unwrap_or_else(|| panic!("config_document"))(
+            handle, &mut ptr, &mut len,
+        )
     };
     if status != AmmStatus::Ok {
         return Err(status);
@@ -46,17 +35,6 @@ fn config_document(handle: AmmHandle) -> Result<String, AmmStatus> {
     Ok(String::from_utf8(bytes.to_vec()).unwrap_or_else(|error| panic!("utf-8: {error}")))
 }
 
-fn session_log(host: &TestHost, id: &str) -> String {
-    let dir = host.game_dir().join("logs").join("amm").join("@test").join(id);
-    let entries = std::fs::read_dir(&dir).unwrap_or_else(|error| panic!("log folder: {error}"));
-    entries
-        .map(|entry| {
-            std::fs::read_to_string(entry.unwrap_or_else(|error| panic!("entry: {error}")).path())
-                .unwrap_or_else(|error| panic!("log text: {error}"))
-        })
-        .collect()
-}
-
 fn drive_frames(host: &TestHost, count: u64) {
     for now in 0..count {
         host.frame(now);
@@ -64,85 +42,64 @@ fn drive_frames(host: &TestHost, count: u64) {
 }
 
 #[test]
-fn null_descriptor_returns_null_pointer() {
-    let _host = TestHost::new();
+fn null_descriptor_and_null_handle_return_null_pointer() {
+    let host = TestHost::new();
     let text = Descriptors::overlay("solo");
-    let mut handle = AmmHandle { slot: 0, generation: 0 };
-    let register = TestHost::api().register.expect("register");
+    let dir = host.next_mod_dir().display().to_string();
+    let register = TestHost::core_table().register.unwrap_or_else(|| panic!("register"));
 
-    let null_text = register_raw(std::ptr::null(), 10);
-    // SAFETY: the text and the handle live for the call; the callbacks pointer is null on purpose
-    let null_callbacks = unsafe {
-        register(text.as_ptr(), text.len(), ABSOLUTE_DIR.as_ptr(), ABSOLUTE_DIR.len(), std::ptr::null(), &mut handle)
-    };
-    // SAFETY: the text and the callbacks live for the call; the handle pointer is null on purpose
-    let null_handle = unsafe {
-        register(
-            text.as_ptr(),
-            text.len(),
-            ABSOLUTE_DIR.as_ptr(),
-            ABSOLUTE_DIR.len(),
-            &NO_CALLBACKS,
-            std::ptr::null_mut(),
-        )
-    };
+    let null_text = register_in(std::ptr::null(), 10, &dir);
+    // SAFETY: the text and the folder live for the call; the handle pointer is null on purpose
+    let null_handle = unsafe { register(text.as_ptr(), text.len(), dir.as_ptr(), dir.len(), std::ptr::null_mut()) };
 
     assert_eq!(null_text, AmmStatus::NullPointer);
-    assert_eq!(null_callbacks, AmmStatus::NullPointer);
     assert_eq!(null_handle, AmmStatus::NullPointer);
 }
 
 #[test]
 fn bad_descriptor_returns_invalid_descriptor() {
-    let _host = TestHost::new();
+    let host = TestHost::new();
     let not_hcl = "id = ";
     let not_utf8 = [0xFFu8, 0xFE, 0x00];
+    let dir = host.next_mod_dir().display().to_string();
 
-    assert_eq!(register_raw(not_hcl.as_ptr(), not_hcl.len()), AmmStatus::InvalidDescriptor);
-    assert_eq!(register_raw(not_utf8.as_ptr(), not_utf8.len()), AmmStatus::InvalidDescriptor);
+    assert_eq!(register_in(not_hcl.as_ptr(), not_hcl.len(), &dir), AmmStatus::InvalidDescriptor);
+    assert_eq!(register_in(not_utf8.as_ptr(), not_utf8.len(), &dir), AmmStatus::InvalidDescriptor);
 }
 
 #[test]
 fn register_without_a_host_returns_manager_missing() {
     let text = Descriptors::overlay("early");
 
-    assert_eq!(register_raw(text.as_ptr(), text.len()), AmmStatus::ManagerMissing);
+    assert_eq!(register_in(text.as_ptr(), text.len(), ABSOLUTE_DIR), AmmStatus::ManagerMissing);
 }
 
 #[test]
-fn wrong_abi_major_returns_a_null_table() {
-    assert!(amm_api_for(AMM_ABI_MAJOR + 1).is_null());
-    assert!(amm_api_for(0).is_null());
-    assert!(!amm_api_for(AMM_ABI_MAJOR).is_null());
-}
+fn every_table_declares_its_size_and_the_abi_minor_and_fills_every_slot() {
+    let (core, settings, keybinds, layers, leases) = (
+        TestHost::core_table(),
+        TestHost::settings_table(),
+        TestHost::keybinds_table(),
+        TestHost::layers_table(),
+        TestHost::leases_table(),
+    );
 
-#[test]
-fn table_size_equals_size_of_amm_api() {
-    let api = TestHost::api();
-
-    assert_eq!(api.size as usize, size_of::<AmmApi>());
-    assert_eq!((api.abi_major, api.abi_minor), (AMM_ABI_MAJOR, AMM_ABI_MINOR));
-    assert!(api.register.is_some() && api.unregister.is_some() && api.config_document.is_some());
-    assert!(api.acquire.is_some() && api.release.is_some() && api.holder.is_some());
-    assert!(api.poll_events.is_some() && api.key_down.is_some() && api.set_setting.is_some());
-    assert!(api.set_cursor_mode.is_some() && api.log.is_some());
-    assert!(api.request_screenshot.is_some() && api.held_by_other.is_some() && api.texture_budget.is_some());
-    assert!(api.request_screenshot_layers.is_some() && api.register_menu_entry.is_some());
-}
-
-#[test]
-fn abi_minor_is_4() {
-    assert_eq!(AMM_ABI_MINOR, 4);
-    assert_eq!(TestHost::api().abi_minor, 4);
-}
-
-#[test]
-fn table_fills_watch_keys_and_send_key() {
-    let api = TestHost::api();
-
-    assert!(api.watch_keys.is_some() && api.send_key.is_some() && api.send_pointer.is_some());
-    assert!(api.panel_open.is_some() && api.send_move.is_some());
-    assert_eq!(api.size as usize, size_of::<AmmApi>());
+    assert_eq!(core.size as usize, size_of_val(core));
+    assert_eq!(settings.size as usize, size_of_val(settings));
+    assert_eq!(keybinds.size as usize, size_of_val(keybinds));
+    assert_eq!(layers.size as usize, size_of_val(layers));
+    assert_eq!(leases.size as usize, size_of_val(leases));
+    assert_eq!([core.version, settings.version, keybinds.version, layers.version, leases.version], [AMM_ABI_MINOR; 5]);
+    assert!(core.register.is_some() && core.unregister.is_some() && core.poll_events.is_some());
+    assert!(core.locale.is_some() && core.panel_open.is_some());
+    assert!(core.register_menu_entry.is_some() && core.set_icon.is_some());
+    assert!(settings.config_document.is_some() && settings.set_setting.is_some());
+    assert!(keybinds.chord_text.is_some() && keybinds.bind_down.is_some());
+    assert!(layers.set_callbacks.is_some() && layers.texture_budget.is_some() && layers.set_cursor_mode.is_some());
+    assert!(layers.game_picture.is_some() && layers.set_game_viewport.is_some());
+    assert!(layers.set_render_size.is_some() && layers.render_size.is_some());
+    assert!(leases.acquire.is_some() && leases.release.is_some());
+    assert!(leases.holder.is_some() && leases.held_by_other.is_some());
 }
 
 #[test]
@@ -302,25 +259,26 @@ fn stale_handle_is_rejected_by_every_function() {
     let stale = first.handle();
     first.unregister();
     let mut second = TestClient::register(&host, &Descriptors::overlay("reused"), TestMesh::triangle());
-    let api = TestHost::api();
     let (path, value) = ("missing.path", "1");
     assert_eq!(second.handle().slot, stale.slot);
     assert_ne!(second.handle().generation, stale.generation);
     assert_eq!(second.acquire(AmmCapability::Overlay).outcome, AmmAcquireOutcome::Granted);
 
+    let (settings, keybinds, leases, layers) =
+        (TestHost::settings_table(), TestHost::keybinds_table(), TestHost::leases_table(), TestHost::layers_table());
     // SAFETY: the path and value live for the call
-    let set = unsafe { api.set_setting.expect("set_setting")(stale, path.as_ptr(), path.len(), value.as_ptr(), 1) };
-    // SAFETY: key_down takes plain values
-    let key = unsafe { api.key_down.expect("key_down")(stale, 0x41) };
+    let set =
+        unsafe { settings.set_setting.expect("set_setting")(stale, path.as_ptr(), path.len(), value.as_ptr(), 1) };
+    // SAFETY: bind_down takes plain values
+    let bind = unsafe { keybinds.bind_down.expect("bind_down")(stale, 0) };
     let acquired = {
         // SAFETY: acquire takes plain values
-        unsafe { api.acquire.expect("acquire")(stale, AmmCapability::Overlay as u8) }
+        unsafe { leases.acquire.expect("acquire")(stale, AmmCapability::Overlay as u8) }
     };
-    TestClient::log_handle(stale, AmmLogLevel::Error as u8, "stale line", "");
     // SAFETY: release and set_cursor_mode take plain values
     unsafe {
-        api.release.expect("release")(stale, AmmCapability::Overlay as u8);
-        api.set_cursor_mode.expect("set_cursor_mode")(stale, 1);
+        leases.release.expect("release")(stale, AmmCapability::Overlay as u8);
+        layers.set_cursor_mode.expect("set_cursor_mode")(stale, 1);
     }
     let unregistered = TestClient::unregister_handle(stale);
     let (holder_len, holder) = TestClient::holder_id(AmmCapability::Overlay as u8, 64);
@@ -328,7 +286,7 @@ fn stale_handle_is_rejected_by_every_function() {
 
     assert_eq!(config_document(stale), Err(AmmStatus::UnknownHandle));
     assert_eq!(set, AmmStatus::UnknownHandle);
-    assert!(!key);
+    assert_eq!(bind, 0);
     assert_eq!(acquired.outcome, AmmAcquireOutcome::Denied);
     assert!(TestClient::poll_handle(stale).is_empty());
     assert!(config_document(second.handle()).is_ok());
@@ -337,23 +295,6 @@ fn stale_handle_is_rejected_by_every_function() {
     assert!(TestHost::owners(&frame).contains(&second.owner()));
     assert!(!frame.cursor_free);
     second.unregister();
-    assert!(!session_log(&host, "reused").contains("stale line"));
-}
-
-#[test]
-fn log_with_bad_fields_json_keeps_the_raw_text_in_a_field() {
-    let host = TestHost::new();
-    let mut client = TestClient::register(&host, &Descriptors::overlay("logger"), TestMesh::triangle());
-
-    client.log(AmmLogLevel::Warn as u8, "good fields", "{\"count\":3}");
-    client.log(AmmLogLevel::Warn as u8, "bad fields", "{not json");
-    client.log(99, "bad level", "");
-    client.unregister();
-    let text = session_log(&host, "logger");
-
-    assert!(text.contains("good fields {\"count\":3}"));
-    assert!(text.contains("bad fields {\"fields_unparsed\":\"{not json\"}"));
-    assert!(!text.contains("bad level"));
 }
 
 #[test]
@@ -467,8 +408,9 @@ fn holder_with_a_buffer_too_small_writes_nothing_and_returns_the_id_length() {
 
     let (len, buffer) = TestClient::holder_id(AmmCapability::Overlay as u8, 4);
     // SAFETY: a null buffer with no room is a length query
-    let queried =
-        unsafe { TestHost::api().holder.expect("holder")(AmmCapability::Overlay as u8, std::ptr::null_mut(), 0) };
+    let queried = unsafe {
+        TestHost::leases_table().holder.expect("holder")(AmmCapability::Overlay as u8, std::ptr::null_mut(), 0)
+    };
 
     assert_eq!(len as usize, "@test/long-holder-id".len());
     assert_eq!(queried, len);
@@ -554,37 +496,4 @@ fn register_refuses_a_config_folder_another_live_mod_uses_until_it_unregisters()
 
     assert_eq!(while_live, AmmStatus::InvalidArgument);
     assert_eq!(after, AmmStatus::Ok);
-}
-
-fn register_with_callbacks_of_size(size: u32) -> (AmmStatus, AmmHandle) {
-    let text = Descriptors::overlay("sized-callbacks");
-    let callbacks = AmmCallbacks { size, ..NO_CALLBACKS };
-    let mut handle = AmmHandle { slot: 77, generation: 77 };
-    let register = TestHost::api().register.unwrap_or_else(|| panic!("register"));
-    // SAFETY: the text, folder, callbacks and handle live for the call
-    let status = unsafe {
-        register(text.as_ptr(), text.len(), ABSOLUTE_DIR.as_ptr(), ABSOLUTE_DIR.len(), &callbacks, &mut handle)
-    };
-    (status, handle)
-}
-
-#[test]
-fn register_refuses_callbacks_with_size_zero() {
-    let _host = TestHost::new();
-
-    let (status, handle) = register_with_callbacks_of_size(0);
-
-    assert_eq!(status, AmmStatus::InvalidArgument);
-    assert_eq!(handle, AmmHandle { slot: 77, generation: 77 });
-}
-
-#[test]
-fn register_refuses_callbacks_below_base() {
-    let _host = TestHost::new();
-
-    let (status, _) = register_with_callbacks_of_size(size_of::<AmmCallbacks>() as u32 - 8);
-    let (retry, _) = register_with_callbacks_of_size(size_of::<AmmCallbacks>() as u32);
-
-    assert_eq!(status, AmmStatus::InvalidArgument);
-    assert_eq!(retry, AmmStatus::Ok);
 }

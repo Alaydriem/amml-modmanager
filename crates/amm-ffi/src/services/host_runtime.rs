@@ -4,21 +4,19 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use amm_abi::types::{AmmCallbacks, AmmCaptureStreamFrame, AmmEvent, AmmFrameOutput, AmmHandle, AmmStatus};
+use amm_abi::types::{AmmCallbacks, AmmEvent, AmmFrameOutput, AmmHandle, AmmStatus};
 use amm_core::config::ManagerConfig;
 use amm_core::errors::ManagerError;
-use amm_core::services::capture::CaptureStreamBook;
 use amm_core::services::descriptor::DescriptorChecker;
 use amm_core::services::manager::ManagerService;
 use amm_core::services::settings::{ChordText, ManagerConfigFile};
 use amm_core::services::{PanicGuard, PathRules};
-use amm_core::structs::capture::{CaptureStreamRequest, ScreenshotLayers};
 use amm_core::structs::descriptor::Capability;
 use amm_core::structs::event::ModEvent;
 use amm_core::structs::frame::{FrameInputData, LayerKind, UiEvent, UiEventKind};
 use amm_core::structs::icon::ModIcon;
 use amm_core::structs::input::GameViewport;
-use amm_core::structs::input::{FakeKeyOp, InputEvent, Modifiers, MoveIntent, PointerOp, RouteDecision};
+use amm_core::structs::input::{InputEvent, Modifiers, RouteDecision};
 use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::manager::TextureGrant;
 use amm_core::structs::menu::MenuScreens;
@@ -34,37 +32,32 @@ use amm_ui::model::{PanelAction, PanelModel};
 use amm_ui::runtime::PanelRuntime;
 use amml_ui::font::FontSource;
 
-use super::{
-    CaptureRelay, ClientSlot, FrameCompositor, HolderBook, HostShared, LogBridge, PresentSequence, UiEventBuffer,
-};
+use super::{ClientSlot, FrameCompositor, HolderBook, HostShared, LogBridge, TableGate, UiEventBuffer};
 use crate::types::{AmmHostFrame, AmmHostFrameInput, AmmHostRoute};
 
-/// Everything the manager DLL runs: the manager service, the config writer thread, the panel, the compositor and
-/// one client slot per mod slot. Every method runs under the host lock. The state other threads read without the
-/// lock is published to `HostShared` after each call. Bounds: the slots, the panel event buffer and the poll
-/// buffer are fixed at creation from the manager config.
+/// Everything the manager DLL runs: the manager service, the config writer thread, the panel, the compositor, one
+/// client slot per mod slot and the gate of the registry tables. Every method runs under the host lock. The state
+/// other threads read without the lock is published to `HostShared` after each call. Bounds: the slots, the panel
+/// event buffer and the poll buffer are fixed at creation from the manager config.
 pub struct HostRuntime {
     manager: ManagerService,
     checker: DescriptorChecker,
     io: Option<IoThread>,
     panel: PanelRuntime,
     compositor: Option<FrameCompositor>,
-    captures: CaptureRelay,
-    stream: CaptureStreamBook,
     slots: Vec<ClientSlot>,
     // the config folder each live mod registered with, one entry per slot
     mod_dirs: Vec<Option<PathBuf>>,
     manager_dir: PathBuf,
+    // the AMML mods folder that holds the manager; a mod's config folder must be inside it
+    mods_root: Option<PathBuf>,
+    gate: Arc<TableGate>,
     shared: Arc<HostShared>,
     holders: Arc<HolderBook>,
     logs: &'static LogBridge,
     panel_events: UiEventBuffer,
     panel_actions: Vec<PanelAction>,
     poll_buffer: Vec<ModEvent>,
-    // fake key presses taken from the manager that the host has not collected yet; the manager bounds the queue
-    fake_ops: Vec<FakeKeyOp>,
-    // fake mouse actions taken from the manager that the host has not collected yet; the manager bounds the queue
-    fake_pointer_ops: Vec<PointerOp>,
     manager_version: String,
     now_ms: u64,
     // the size of the last size message; a message with the same size again is a resend
@@ -85,8 +78,8 @@ impl HostRuntime {
     const POLL_CHUNK: usize = 64;
     const MS_PER_SEC: u64 = 1000;
 
-    /// Reads the manager config from `config_dir`, the manager's own config folder, starts logging and the config
-    /// writer, and builds the panel. It opens the manager's log slot, which shutdown closes, and starts threads, so
+    /// Reads the manager config from `config_dir`, the manager's own config folder
+    /// (`<mods>/@<namespace>/<name>/config`), starts logging and the config writer, and builds the panel. It opens the manager's log slot, which shutdown closes, and starts threads, so
     /// it must not run under the OS loader lock.
     pub fn new(config_dir: PathBuf, game_dir: PathBuf, manager_version: String) -> Result<HostRuntime, ManagerError> {
         let (config, config_file, config_fault) = Self::read_config(&config_dir);
@@ -112,19 +105,17 @@ impl HostRuntime {
             io: Some(io),
             panel: PanelRuntime::new(FontSource::Embedded, manager.locale()),
             compositor: Some(FrameCompositor::new(&budgets)),
-            captures: CaptureRelay::new(),
-            stream: CaptureStreamBook::new(),
             slots: (0..slot_count).map(|_| ClientSlot::new(budgets.event_queue)).collect(),
             mod_dirs: vec![None; slot_count],
+            mods_root: PathRules::mods_root(&config_dir).map(Path::to_path_buf),
             manager_dir: config_dir,
+            gate: Arc::new(TableGate::new()),
             shared,
             holders,
             logs,
             panel_events: UiEventBuffer::new(budgets.event_queue),
             panel_actions: Vec::new(),
             poll_buffer: vec![ModEvent::Enabled; Self::POLL_CHUNK],
-            fake_ops: Vec::new(),
-            fake_pointer_ops: Vec::new(),
             manager_version,
             now_ms: 0,
             last_size_message: None,
@@ -141,6 +132,20 @@ impl HostRuntime {
         &self.shared
     }
 
+    /// The gate of the registry tables this host serves.
+    pub fn table_gate(&self) -> &Arc<TableGate> {
+        &self.gate
+    }
+
+    /// Closes the registry tables: from now on every table function answers `Disabled` (or 0, or nothing, for one
+    /// that gives no status) without reaching the host. The host itself keeps running until it is shut down.
+    pub fn disable_tables(&self) {
+        if !self.gate.is_closed() {
+            curia::info!("manager tables disabled");
+        }
+        self.gate.close();
+    }
+
     pub fn manager(&self) -> &ManagerService {
         &self.manager
     }
@@ -153,16 +158,12 @@ impl HostRuntime {
         self.pointer
     }
 
-    /// Registers a mod from its descriptor bytes. Its config file, the descriptor's `config_path` in the mod's own
-    /// `config_dir`, is read, checked, and written back at once when the check changed it. `config_dir` must be
-    /// an absolute local path with no `..` part, not a network, device or verbatim path, not the manager's own
-    /// config folder or a folder inside it, and not the folder of another live mod, else `InvalidArgument`.
-    pub fn register(
-        &mut self,
-        descriptor: &[u8],
-        config_dir: &Path,
-        callbacks: AmmCallbacks,
-    ) -> Result<AmmHandle, AmmStatus> {
+    /// Registers a mod from its descriptor bytes, with no callbacks. Its config file, the descriptor's `config_path`
+    /// in the mod's own `config_dir`, is read, checked, and written back at once when the check changed it.
+    /// `config_dir` must be an absolute local path with no `..` part, not a network, device or verbatim path, inside
+    /// the AMML mods folder that holds the manager, not the manager's own config folder or a folder inside it, and
+    /// not the folder of another live mod, else `InvalidArgument`.
+    pub fn register(&mut self, descriptor: &[u8], config_dir: &Path) -> Result<AmmHandle, AmmStatus> {
         let mod_dir = self.checked_config_dir(config_dir)?;
         let text = std::str::from_utf8(descriptor).map_err(|_| AmmStatus::InvalidDescriptor)?;
         let parsed = self.checker.parse(text).map_err(|error| {
@@ -185,7 +186,7 @@ impl HostRuntime {
             self.manager.unregister(index);
             return Err(AmmStatus::TooManyMods);
         };
-        let generation = slot.occupy(callbacks);
+        let generation = slot.occupy();
         if let (Some(compositor), Some(grant)) = (self.compositor.as_mut(), self.manager.texture_grant(index)) {
             compositor.grant_textures(index.0, grant);
         }
@@ -200,12 +201,19 @@ impl HostRuntime {
         Ok(handle)
     }
 
+    /// Sets the frame and `textures_lost` callbacks of `handle`, replacing the ones it had.
+    pub fn set_callbacks(&mut self, handle: AmmHandle, callbacks: AmmCallbacks) -> Result<(), AmmStatus> {
+        let index = self.index(handle)?;
+        let slot = self.slots.get_mut(usize::from(index.0)).ok_or(AmmStatus::UnknownHandle)?;
+        slot.set_callbacks(callbacks);
+        Ok(())
+    }
+
     /// Removes a mod: its leases, cursor request, layer, log file and textures.
     pub fn unregister(&mut self, handle: AmmHandle) -> Result<(), AmmStatus> {
         let index = self.index(handle)?;
         self.shared.set_generation(handle.slot, None);
         self.manager.unregister(index);
-        self.stream.unregister(index);
         if let Some(slot) = self.slots.get_mut(usize::from(index.0)) {
             slot.vacate();
         }
@@ -233,29 +241,6 @@ impl HostRuntime {
     pub fn acquire(&mut self, handle: AmmHandle, cap: Capability) -> Result<AcquireOutcome, AmmStatus> {
         let index = self.index(handle)?;
         self.manager.acquire(index, cap, self.now_ms).map_err(|error| AmmStatus::from(&error))
-    }
-
-    /// Books a screenshot of the next Present at the capture point `layers`, written to `path`, and returns its
-    /// sequence. A mod without an active `Hud` or `Overlay` lease is `NotPermitted` before any path check. On top
-    /// of the manager's path rules the parent folder of `path` must exist, else `InvalidArgument`.
-    pub fn request_screenshot(
-        &mut self,
-        handle: AmmHandle,
-        path: &Path,
-        layers: ScreenshotLayers,
-    ) -> Result<u32, AmmStatus> {
-        let index = self.index(handle)?;
-        if !self.manager.may_capture(index) {
-            return Err(AmmStatus::NotPermitted);
-        }
-        if PathRules::screenshot_fault(path).is_none() && !path.parent().is_some_and(Path::is_dir) {
-            curia::warn!("screenshot path refused", {
-                path: path.display().to_string(),
-                reason: "its parent folder does not exist",
-            });
-            return Err(AmmStatus::InvalidArgument);
-        }
-        self.manager.request_capture(index, path, layers).map_err(|error| AmmStatus::from(&error))
     }
 
     pub fn held_by_other(&self, handle: AmmHandle, cap: Capability) -> Result<bool, AmmStatus> {
@@ -321,87 +306,6 @@ impl HostRuntime {
         self.manager.texture_grant(index).ok_or(AmmStatus::UnknownHandle)
     }
 
-    /// The buffer the overlay copies the pixels of capture `sequence` into, and its row pitch. See
-    /// `CaptureRelay::buffer`.
-    pub fn capture_buffer(&mut self, sequence: u32, width: u32, height: u32) -> Result<(*mut u8, u32), AmmStatus> {
-        self.captures.buffer(sequence, width, height).ok_or(AmmStatus::InvalidArgument)
-    }
-
-    /// The overlay copied capture `sequence` (`ok`) in the DXGI format `format`, or failed to.
-    pub fn capture_done(&mut self, sequence: u32, ok: bool, format: u32) -> Result<(), AmmStatus> {
-        self.captures.report(sequence, ok, format).then_some(()).ok_or(AmmStatus::InvalidArgument)
-    }
-
-    /// Books a capture stream frame of the next Present for `handle`. See `CaptureStreamBook::request`.
-    pub fn request_stream_frame(&mut self, handle: AmmHandle, request: CaptureStreamRequest) -> Result<(), AmmStatus> {
-        let index = self.index(handle)?;
-        self.stream.request(self.manager.arbiter(), index, request).map_err(|error| AmmStatus::from(&error))
-    }
-
-    /// The overlay's Present count, for the registered mod `handle`. See `PresentSequence::current`.
-    pub fn present_count(&self, handle: AmmHandle) -> Result<u64, AmmStatus> {
-        self.index(handle)?;
-        Ok(PresentSequence::current())
-    }
-
-    /// The capture stream frames `handle` may ask for now.
-    pub fn stream_free_slots(&self, handle: AmmHandle) -> Result<u32, AmmStatus> {
-        let index = self.index(handle)?;
-        Ok(u32::try_from(self.stream.free_slots(index)).unwrap_or(0))
-    }
-
-    /// The oldest capture stream frame of `handle` once it is done, its pixels lent until the next take that
-    /// returns a frame. `Busy` while it is in flight or the mod has none.
-    pub fn take_stream_frame(&mut self, handle: AmmHandle) -> Result<AmmCaptureStreamFrame, AmmStatus> {
-        let index = self.index(handle)?;
-        match self.stream.take(index) {
-            Some(Ok(frame)) => Ok(AmmCaptureStreamFrame::from(frame)),
-            Some(Err(failure)) => Ok(AmmCaptureStreamFrame::from(failure)),
-            None => Err(AmmStatus::Busy),
-        }
-    }
-
-    /// As `take_stream_frame`, but the pixels are lent until `give_back_stream_frame` with the frame's `lend_id`.
-    /// See `CaptureStreamBook::lend`.
-    pub fn lend_stream_frame(&mut self, handle: AmmHandle) -> Result<AmmCaptureStreamFrame, AmmStatus> {
-        let index = self.index(handle)?;
-        match self.stream.lend(index) {
-            Some(Ok(frame)) => Ok(AmmCaptureStreamFrame::from(frame)),
-            Some(Err(failure)) => Ok(AmmCaptureStreamFrame::from(failure)),
-            None => Err(AmmStatus::Busy),
-        }
-    }
-
-    /// Ends the lend `lend_id` of `handle`. `InvalidArgument` for an id it does not hold.
-    pub fn give_back_stream_frame(&mut self, handle: AmmHandle, lend_id: u64) -> Result<(), AmmStatus> {
-        let index = self.index(handle)?;
-        self.stream.give_back(index, lend_id).then_some(()).ok_or(AmmStatus::InvalidArgument)
-    }
-
-    /// Ends the capture stream of `handle`. See `CaptureStreamBook::close`.
-    pub fn close_stream(&mut self, handle: AmmHandle) -> Result<(), AmmStatus> {
-        let index = self.index(handle)?;
-        self.stream.close(index);
-        Ok(())
-    }
-
-    /// The bytes of capture stream pixel buffers the host holds.
-    pub fn stream_bytes(&self) -> usize {
-        self.stream.held_bytes()
-    }
-
-    /// The buffer the overlay copies the pixels of stream copy `id` into, and its row pitch. See
-    /// `CaptureStreamBook::buffer`.
-    pub fn stream_buffer(&mut self, id: u32, width: u32, height: u32) -> Result<(*mut u8, u32), AmmStatus> {
-        let (buffer, row_pitch) = self.stream.buffer(id, width, height).ok_or(AmmStatus::InvalidArgument)?;
-        Ok((buffer.as_mut_ptr(), row_pitch))
-    }
-
-    /// The overlay copied stream copy `id` (`ok`) in the DXGI format `format`, or failed to.
-    pub fn stream_done(&mut self, id: u32, ok: bool, format: u32) -> Result<(), AmmStatus> {
-        self.stream.report(id, ok, format).then_some(()).ok_or(AmmStatus::InvalidArgument)
-    }
-
     pub fn release(&mut self, handle: AmmHandle, cap: Capability) -> Result<(), AmmStatus> {
         let index = self.index(handle)?;
         self.manager.release(index, cap);
@@ -420,10 +324,11 @@ impl HostRuntime {
         while written < capacity {
             let wanted = (capacity - written).min(self.poll_buffer.len());
             let got = self.manager.poll_events(index, &mut self.poll_buffer[..wanted]);
-            for (offset, event) in self.poll_buffer[..got].iter().enumerate() {
-                write(written + offset, AmmEvent::from(*event));
+            // The manager queues only events with an ABI kind; one without is skipped, not written as a gap
+            for event in self.poll_buffer[..got].iter().filter_map(|event| AmmEvent::try_from(*event).ok()) {
+                write(written, event);
+                written += 1;
             }
-            written += got;
             if got < wanted {
                 break;
             }
@@ -431,83 +336,30 @@ impl HostRuntime {
         Ok(written)
     }
 
-    pub fn key_down(&self, handle: AmmHandle, vk: u32) -> Result<bool, AmmStatus> {
-        let index = self.index(handle)?;
-        Ok(self.manager.key_down(index, vk))
+    /// Whether the manager panel is open.
+    pub fn panel_open(&self) -> bool {
+        self.manager.snapshot().panel_open
     }
 
-    /// Whether the manager panel is open, for a live `handle`.
-    pub fn panel_open(&self, handle: AmmHandle) -> Result<bool, AmmStatus> {
-        self.index(handle)?;
-        Ok(self.manager.snapshot().panel_open)
-    }
-
-    /// Sets the keys `handle` wants to see. See `ManagerService::watch_keys`.
-    pub fn watch_keys(&mut self, handle: AmmHandle, vks: &[u32]) -> Result<(), AmmStatus> {
-        let index = self.index(handle)?;
-        self.manager.watch_keys(index, vks).map_err(|error| AmmStatus::from(&error))
-    }
-
-    /// Holds a game key down or lets it go for `handle`. See `ManagerService::send_key`.
-    pub fn send_key(&mut self, handle: AmmHandle, vk: u32, down: bool) -> Result<(), AmmStatus> {
-        let index = self.index(handle)?;
-        self.manager.send_key(index, vk, down).map_err(|error| AmmStatus::from(&error))
-    }
-
-    /// See `ManagerService::set_key_feed_ready`.
-    pub fn set_key_feed_ready(&mut self, ready: bool) {
-        self.manager.set_key_feed_ready(ready);
-    }
-
-    /// Moves up to `capacity` queued fake key presses, oldest first, to `write(position, op)` and returns how many.
-    /// The rest stay in `fake_ops` for the next call.
-    pub fn take_fake_keys(&mut self, capacity: usize, mut write: impl FnMut(usize, FakeKeyOp)) -> usize {
-        self.manager.take_fake_keys(&mut self.fake_ops);
-        let count = capacity.min(self.fake_ops.len());
-        for (position, op) in self.fake_ops.drain(..count).enumerate() {
-            write(position, op);
+    /// Where the last frame drew the panel's close button, `[min_x, min_y, max_x, max_y]` in back-buffer pixels;
+    /// `None` while the panel is closed or before its first frame.
+    pub fn panel_close_rect(&self) -> Option<[f32; 4]> {
+        if !self.panel_open() {
+            return None;
         }
-        count
+        self.panel.close_button_rect()
     }
 
-    /// Sends a fake mouse action for `handle`. See `ManagerService::send_pointer`.
-    pub fn send_pointer(&mut self, handle: AmmHandle, op: PointerOp) -> Result<(), AmmStatus> {
+    /// The chord keybind `action` of `handle` uses now, as text. `None` for an action past its descriptor's list.
+    pub fn chord_text(&self, handle: AmmHandle, action: u16) -> Result<Option<String>, AmmStatus> {
         let index = self.index(handle)?;
-        self.manager.send_pointer(index, op).map_err(|error| AmmStatus::from(&error))
+        Ok(self.manager.keybind_chord(index, action).map(ChordText::format))
     }
 
-    /// See `ManagerService::set_pointer_feed_ready`.
-    pub fn set_pointer_feed_ready(&mut self, ready: bool) {
-        self.manager.set_pointer_feed_ready(ready);
-    }
-
-    /// Moves up to `capacity` queued fake mouse actions, oldest first, to `write(position, op)` and returns how
-    /// many. The rest stay in `fake_pointer_ops` for the next call.
-    pub fn take_fake_pointer(&mut self, capacity: usize, mut write: impl FnMut(usize, PointerOp)) -> usize {
-        self.manager.take_fake_pointer(&mut self.fake_pointer_ops);
-        let count = capacity.min(self.fake_pointer_ops.len());
-        for (position, op) in self.fake_pointer_ops.drain(..count).enumerate() {
-            write(position, op);
-        }
-        count
-    }
-
-    /// Holds or clears the move intent of `handle`. See `ManagerService::send_move`.
-    pub fn send_move(&mut self, handle: AmmHandle, intent: MoveIntent) -> Result<(), AmmStatus> {
+    /// Whether keybind `action` of `handle` is held down.
+    pub fn bind_down(&self, handle: AmmHandle, action: u16) -> Result<bool, AmmStatus> {
         let index = self.index(handle)?;
-        self.manager.send_move(index, intent).map_err(|error| AmmStatus::from(&error))
-    }
-
-    /// See `ManagerService::set_move_available`.
-    pub fn set_move_available(&mut self, available: bool) {
-        self.manager.set_move_available(available);
-    }
-
-    /// The tick saw whether the game has a local player in an active world; the answer is the held move intent,
-    /// all zero when none is held.
-    pub fn move_tick(&mut self, player_ready: bool) -> MoveIntent {
-        self.manager.set_player_ready(player_ready);
-        self.manager.move_intent()
+        Ok(self.manager.keybind_down(index, action))
     }
 
     pub fn set_setting(&mut self, handle: AmmHandle, path: &str, value_hcl: &str) -> Result<(), AmmStatus> {
@@ -565,20 +417,10 @@ impl HostRuntime {
         AmmHostRoute { consume: decision.consume_from_game }
     }
 
-    /// Composes one Present: hands on the captures the overlay reported, offers the pending ones and the pending
-    /// capture stream frames, takes the size message for the game, then builds the layers.
+    /// Composes one Present: takes the size message for the game, then builds the layers.
     pub fn frame(&mut self, input: &AmmHostFrameInput) -> AmmHostFrame {
         self.now_ms = input.now_ms.max(self.now_ms);
         self.back_buffer = GamePicture::new(input.width, input.height);
-        CaptureRelay::collect_written(&mut self.manager, self.io.as_ref());
-        self.captures.advance(&mut self.manager, self.io.as_ref());
-        let mut offered = self.captures.offer(&mut self.manager);
-        let back_buffer = RenderSize::new(input.width, input.height);
-        self.stream.advance(back_buffer);
-        let streams =
-            self.stream.offer_at(self.manager.arbiter(), back_buffer, PresentSequence::current(), &mut offered.streams);
-        offered.stream_count = u32::try_from(streams).unwrap_or(0);
-        offered.release_stream = self.stream.take_release();
         if self.shared.take_window_changed() {
             self.manager.render_size_window_changed();
         }
@@ -593,14 +435,14 @@ impl HostRuntime {
             }
         }
         let Some(mut compositor) = self.compositor.take() else {
-            return AmmHostFrame::empty().with_captures_of(&offered).with_size_message(message);
+            return AmmHostFrame::empty().with_size_message(message);
         };
         let composed = PanicGuard::run(
             || compositor.compose(self, input),
             |_| curia::error!("frame compose panicked, nothing drawn this frame"),
         );
         self.compositor = Some(compositor);
-        composed.unwrap_or_else(AmmHostFrame::empty).with_captures_of(&offered).with_size_message(message)
+        composed.unwrap_or_else(AmmHostFrame::empty).with_size_message(message)
     }
 
     /// Calls the frame callback of the mod in `index` for the layer `kind`, `allowed_layers` holding that layer's
@@ -671,43 +513,23 @@ impl HostRuntime {
             slot.textures_lost();
         }
         self.panel.textures_lost();
-        self.captures.device_lost();
-        self.stream.device_lost();
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.textures_lost();
         }
     }
 
-    /// See `ManagerService::take_focus_loss_owed`.
-    pub fn take_focus_loss_owed(&mut self) -> bool {
-        self.manager.take_focus_loss_owed()
-    }
-
-    /// Lets go of every fake key and mouse button the mods hold.
-    pub fn release_fake_keys(&mut self) {
-        self.manager.release_fake_keys();
-    }
-
+    /// A world finished loading (`true`) or was left (`false`). A load sends `WorldReloadApply` to each mod with a saved
+    /// `WorldReload` change.
     pub fn world(&mut self, loaded: bool) {
         if loaded {
             self.manager.world_loaded();
-        } else {
-            self.manager.world_left();
         }
     }
 
-    /// Hands the due config writes to the writer, gives the manager the screenshots the writer finished, ages the
-    /// captures no Present has taken, logs the fake mouse actions a full queue evicted or refused since the last tick, and
-    /// logs telemetry each interval when it is on.
+    /// Hands the due config writes to the writer and logs telemetry each interval when it is on.
     pub fn tick(&mut self, now_ms: u64) {
         self.now_ms = now_ms.max(self.now_ms);
         self.flush_writes(self.now_ms);
-        CaptureRelay::collect_written(&mut self.manager, self.io.as_ref());
-        self.manager.tick_captures();
-        let pointer_drops = self.manager.take_pointer_drops();
-        if pointer_drops > 0 {
-            curia::warn!("fake pointer queue full, wheel actions evicted or actions refused", { dropped: pointer_drops });
-        }
         let config = self.manager.config();
         let interval_ms = u64::from(config.telemetry_interval_secs) * Self::MS_PER_SEC;
         if config.telemetry && self.now_ms.saturating_sub(self.last_telemetry_ms) >= interval_ms {
@@ -720,8 +542,8 @@ impl HostRuntime {
     }
 
     /// Publishes what other threads read without the lock: the holder book when a holder changed, the end of the
-    /// last toast, whether the menu button is placed, whether the player's turn and the gamepad are blocked, whether a capture
-    /// is in flight, and the forced render size. It allocates only when a holder changed.
+    /// last toast, whether the menu button is placed, and the forced render size. It allocates only when a holder
+    /// changed.
     pub fn publish_shared(&mut self) {
         let indices = Capability::ALL.map(|cap| self.holder_of(cap));
         if indices != self.holders.indices() {
@@ -737,14 +559,6 @@ impl HostRuntime {
         let last = self.manager.toasts().visible(0, u64::MAX).map(|toast| toast.created_ms).max();
         self.shared.set_toast_until(last.map_or(0, |created| created.saturating_add(PanelModel::TOAST_TTL_MS)));
         self.shared.set_menu_button_placed(self.manager.menu_button_rect().is_some());
-        let (blocks_turn, blocks_gamepad) = {
-            let snapshot = self.shared.snapshot().load();
-            (snapshot.blocks_player_turn, snapshot.blocks_gamepad)
-        };
-        self.shared.set_blocks_player_turn(blocks_turn);
-        self.shared.set_blocks_gamepad(blocks_gamepad);
-        let pending = !self.manager.pending_captures().as_slice().is_empty();
-        self.shared.set_capturing(pending || self.captures.is_active() || self.stream.needs_present());
         self.shared.set_forced_size(self.manager.render_size().forced());
         self.shared.set_render_size_busy(self.manager.render_size().busy());
     }
@@ -770,6 +584,10 @@ impl HostRuntime {
     fn checked_config_dir(&self, config_dir: &Path) -> Result<PathBuf, AmmStatus> {
         let reason = PathRules::fault(config_dir).or_else(|| {
             let key = Self::path_key(config_dir);
+            let root = self.mods_root.as_deref().map(Self::path_key);
+            if root.is_none_or(|root| key.len() <= root.len() || !key.starts_with(&root)) {
+                return Some("it is not inside the AMML mods folder that holds the manager");
+            }
             if key.starts_with(&Self::path_key(&self.manager_dir)) {
                 return Some("it is the manager's own config folder or inside it");
             }

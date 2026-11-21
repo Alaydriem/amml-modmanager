@@ -1,20 +1,25 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use amm_abi::types::{AMM_ABI_MAJOR, AmmLogLevel, AmmStatus};
-use amm_client::link::ApiTable;
+use amm_abi::types::{AmmLogLevel, AmmStatus};
+use amm_client::link::{FrameHandler, ManagerLink};
+use amm_core::structs::descriptor::Descriptor;
 use amm_core::structs::toast::ToastKind;
-use amm_ffi::api::amm_api_for;
+use amm_ffi::api::ManagerTables;
 use amm_ffi::host::{amm_host_create, amm_host_destroy, amm_host_frame, amm_host_key, amm_host_log, amm_host_tick};
 use amm_ffi::services::{HostCell, HostRuntime};
 use amm_ffi::types::{AmmHostFrame, AmmHostFrameInput, AmmHostLayer, AmmHostRoute};
+use amml_api::amml_abi::{AmmlDirKind, ProviderGone, ProviderReady};
+use amml_api::testing::FakeGame;
 use tempfile::TempDir;
 
-/// The process-global host in temporary config and game folders, destroyed on drop.
+/// The process-global host in temporary config and game folders, destroyed on drop, and a fake AMML loader that holds
+/// its five registry tables for the mods that link to it.
 pub struct HostFixture {
     dir: TempDir,
     next_mod: AtomicU32,
+    loader: FakeGame,
 }
 
 impl HostFixture {
@@ -30,7 +35,7 @@ impl HostFixture {
     /// Starts the host with `config_hcl` as the manager's own `config.hcl`, unless it is empty.
     pub fn with_config(config_hcl: &str) -> HostFixture {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"));
-        let fixture = Self { dir, next_mod: AtomicU32::new(0) };
+        let fixture = Self { dir, next_mod: AtomicU32::new(0), loader: FakeGame::new() };
         fs::create_dir_all(fixture.config_dir()).unwrap_or_else(|error| panic!("config dir: {error}"));
         if !config_hcl.is_empty() {
             fs::write(fixture.config_dir().join("config.hcl"), config_hcl)
@@ -43,13 +48,30 @@ impl HostFixture {
             amm_host_create(config.as_ptr(), config.len(), game.as_ptr(), game.len(), version.as_ptr(), version.len())
         };
         assert_eq!(status, AmmStatus::Ok);
+        fixture.loader.offer::<ProviderReady>();
+        fixture.loader.offer::<ProviderGone>();
+        let provided = ManagerTables::provide_all(&fixture.loader.ctx().registry());
+        provided.unwrap_or_else(|error| panic!("provide the manager tables: {error:?}"));
         fixture
     }
 
-    pub fn table(&self) -> ApiTable {
-        let ptr = amm_api_for(AMM_ABI_MAJOR);
-        // SAFETY: amm_api_for returns null or the manager's static table
-        unsafe { ApiTable::new(ptr) }.unwrap_or_else(|error| panic!("api table: {error:?}"))
+    /// The fake loader the manager tables are provided into.
+    pub fn loader(&self) -> &FakeGame {
+        &self.loader
+    }
+
+    /// Starts a link for a mod whose config folder is `config_dir`. The tables are there, so the link is connected
+    /// when this returns.
+    pub fn link<H: FrameHandler + Send + 'static>(
+        &self,
+        descriptor: &'static str,
+        config_dir: &Path,
+        handler: H,
+    ) -> ManagerLink {
+        self.loader.set_dir(AmmlDirKind::CONFIG, &config_dir.display().to_string());
+        let id = hcl::from_str::<Descriptor>(descriptor).map(|parsed| parsed.id()).unwrap_or_default();
+        let ctx = self.loader.ctx_named(Box::leak(id.into_boxed_str()));
+        ManagerLink::start(&ctx, descriptor, Some(handler)).unwrap_or_else(|error| panic!("start the link: {error:?}"))
     }
 
     pub fn config_dir(&self) -> PathBuf {

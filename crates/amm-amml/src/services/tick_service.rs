@@ -1,56 +1,65 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::traits::GameCalls;
+use amm_ffi::services::HostCell;
+use amml_api::{Client, EventCtx, Screen};
 
-/// The game-thread side of the manager: the host tick, the world events, the `ClientInstance*` of the last tick,
-/// and whether the game has ticked, which binds the overlay.
+use super::{ClientFlags, ManagerClock, ManagerInputSink};
+
+/// The game-thread side of the manager, once per `ClientTick`: the host tick (config writes, telemetry, the console
+/// lines), the screen on top for the host frame, whether the player is in play, then the client flags. It does
+/// not allocate.
 pub struct TickService {
-    client: AtomicUsize,
-    ticked: AtomicBool,
-    last_tick_ms: AtomicU64,
+    sink: ManagerInputSink,
+    clock: ManagerClock,
+    flags: ClientFlags,
+    // the screen code of the last tick, read by the render thread for the host frame
+    menu: Arc<AtomicU8>,
 }
 
 impl TickService {
-    pub const fn new() -> Self {
-        Self { client: AtomicUsize::new(0), ticked: AtomicBool::new(false), last_tick_ms: AtomicU64::new(0) }
+    /// Any screen other than the start or pause screen, and play.
+    pub const MENU_NONE: u8 = 0;
+    pub const MENU_START: u8 = 1;
+    pub const MENU_PAUSE: u8 = 2;
+
+    pub fn new(sink: ManagerInputSink, clock: ManagerClock, flags: ClientFlags, menu: Arc<AtomicU8>) -> Self {
+        Self { sink, clock, flags, menu }
     }
 
-    /// One client tick, after the game's own update of `client`.
-    pub fn tick(&self, calls: &dyn GameCalls, client: usize) {
-        self.client.store(client, Ordering::Relaxed);
-        let now = calls.now_ms();
-        calls.host_tick(now);
-        self.last_tick_ms.store(now, Ordering::Relaxed);
-        self.ticked.store(true, Ordering::SeqCst);
+    /// One `ClientTick`. With no client in the event (before the first client update, after a world leave) only
+    /// the host ticks.
+    pub fn on_tick(&mut self, at: &EventCtx) {
+        let _ = HostCell::global().tick(self.clock.now_ms());
+        let Some(client) = at.client() else {
+            return;
+        };
+        self.menu.store(Self::menu_code(client.top_screen()), Ordering::Relaxed);
+        let want = self.sink.wants(Self::in_play(&client));
+        self.flags.apply(&client, want);
     }
 
-    /// A world finished loading (`true`) or is being left (`false`), before the game's own handling. Leaving
-    /// forgets the client until the next tick.
-    pub fn world(&self, calls: &dyn GameCalls, loaded: bool) {
-        calls.host_world(loaded);
-        if !loaded {
-            self.client.store(0, Ordering::Relaxed);
+    /// The host frame's code of a top screen: 1 the start screen, 2 the pause screen, 0 any other screen, play and
+    /// an unread screen.
+    pub fn menu_code(screen: Option<Screen>) -> u8 {
+        match screen {
+            Some(Screen::Start) => Self::MENU_START,
+            Some(Screen::Pause) => Self::MENU_PAUSE,
+            _ => Self::MENU_NONE,
         }
     }
 
-    /// The game has run at least one tick.
-    pub fn game_ready(&self) -> bool {
-        self.ticked.load(Ordering::SeqCst)
+    /// The player is in a world with no game screen on top: a local player, an active world and no menu.
+    pub fn in_play(client: &Client<'_>) -> bool {
+        client.local_player().is_some() && client.world_active() == Some(true) && client.showing_menu() != Some(true)
     }
 
-    /// The `ClientInstance*` of the last tick; 0 before the first and after leaving a world.
-    pub fn client(&self) -> usize {
-        self.client.load(Ordering::Relaxed)
+    pub fn flags(&self) -> &ClientFlags {
+        &self.flags
     }
 
-    /// A tick ran at most `window_ms` before `now_ms`.
-    pub fn ticked_within(&self, now_ms: u64, window_ms: u64) -> bool {
-        self.game_ready() && now_ms.saturating_sub(self.last_tick_ms.load(Ordering::Relaxed)) <= window_ms
-    }
-}
-
-impl Default for TickService {
-    fn default() -> Self {
-        Self::new()
+    /// The screen code of the last tick.
+    pub fn menu_screen(&self) -> u8 {
+        self.menu.load(Ordering::Relaxed)
     }
 }

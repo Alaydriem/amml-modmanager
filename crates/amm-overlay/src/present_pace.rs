@@ -1,32 +1,36 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use windows::Win32::Foundation::DXGI_STATUS_OCCLUDED;
-use windows::core::HRESULT;
 
 use crate::pace_clock::PaceClock;
 use crate::pace_state::PaceState;
 use crate::pace_summary::PaceSummary;
 
-/// Log-only: how the game presents. It counts every outermost Present, the time spent inside the original Present
-/// (a vsync wait shows there), the Presents the DXGI reports as occluded, the Presents made while the game window is
-/// in front, and the time of the GPU readbacks. Once per second, at debug level, it logs the window; it logs the
-/// `SyncInterval` and flags whenever they change; and when a forced render size ends it logs the totals of the span.
-/// It changes nothing in the Present. A render that runs no faster at 1080p than at 4K, with `SyncInterval` 1, is
-/// held by vsync.
-pub(crate) struct PresentPace {
+/// Log-only: how the game presents. It counts every present of the bound swap chain, the time spent inside the
+/// game's Present (a vsync wait shows there), the presents reported as occluded and the presents made while the game
+/// window is in front. Once per second, at debug level, it logs the window; it logs the `SyncInterval` and flags
+/// whenever they change; and when a forced render size ends it logs the totals of the span. It changes nothing in
+/// the present. A render that runs no faster at 1080p than at 4K, with `SyncInterval` 1, is held by vsync.
+pub struct PresentPace {
     state: Mutex<PaceState>,
+}
+
+impl Default for PresentPace {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PresentPace {
     const WINDOW_MS: u64 = 1_000;
 
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self { state: Mutex::new(PaceState::new()) }
     }
 
     /// The host forces the chain's size (`true`) or lets the game choose it (`false`). A new forced span starts with
     /// fresh counters; the end of a span logs its totals.
-    pub(crate) fn set_forced(&self, forced: bool) {
+    pub fn set_forced(&self, forced: bool) {
         let ended = {
             let mut state = self.lock();
             if state.forced == forced {
@@ -52,32 +56,18 @@ impl PresentPace {
             occluded: summary.occluded,
             foreground: summary.foreground,
             unbound: summary.unbound,
-            readbacks: summary.readbacks,
-            readback_ms_mean: summary.readback_ms_mean,
-            readback_ms_max: summary.readback_ms_max,
             sync_intervals: sync_intervals,
             flags: flags
         });
     }
 
-    /// A finished outermost, non-test Present with `sync` and `flags` that spent `inside_us` inside the original
-    /// and returned `result`; `foreground` is whether the game window was the foreground window, `None` while no window is bound. A Present that
-    /// does not `count` is not seen.
-    pub(crate) fn observe(
-        &self,
-        sync: u32,
-        flags: u32,
-        result: HRESULT,
-        inside_us: u64,
-        counts: bool,
-        foreground: Option<bool>,
-    ) {
-        if !counts {
-            return;
-        }
+    /// A finished present with `sync` and `flags` that spent `inside_us` inside the game's Present and returned
+    /// `result` (an `HRESULT` value); `foreground` is whether the game window was the foreground window, `None` while
+    /// no window is bound.
+    pub fn observe(&self, sync: u32, flags: u32, result: i32, inside_us: u64, foreground: Option<bool>) {
         let key = (u64::from(sync) << 32) | u64::from(flags);
         let now = PaceClock::now_us();
-        let occluded = result == DXGI_STATUS_OCCLUDED;
+        let occluded = result == DXGI_STATUS_OCCLUDED.0;
         let (changed, report) = {
             let mut state = self.lock();
             let mut changed = false;
@@ -110,15 +100,6 @@ impl PresentPace {
         }
     }
 
-    /// A GPU readback that took `us`.
-    pub(crate) fn add_readback(&self, us: u64) {
-        let mut state = self.lock();
-        state.window.add_readback(us);
-        if state.forced {
-            state.span.add_readback(us);
-        }
-    }
-
     fn log_window(summary: &PaceSummary, forced: bool, changes: u32, sync: u32, flags: u32) {
         curia::debug!("present pace", {
             presents: summary.presents,
@@ -130,9 +111,6 @@ impl PresentPace {
             occluded: summary.occluded,
             foreground: summary.foreground,
             unbound: summary.unbound,
-            readbacks: summary.readbacks,
-            readback_ms_mean: summary.readback_ms_mean,
-            readback_ms_max: summary.readback_ms_max,
             forced: u32::from(forced),
             sync_changes: changes,
             sync_interval: sync,
@@ -157,7 +135,7 @@ impl PresentPace {
         (join(&syncs), join(&flags))
     }
 
-    // a panic in a detour is contained, so a poisoned lock still holds counters worth reading
+    // a panic in a listener is contained, so a poisoned lock still holds counters worth reading
     fn lock(&self) -> MutexGuard<'_, PaceState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }

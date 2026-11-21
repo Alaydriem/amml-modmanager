@@ -1,26 +1,21 @@
 #![allow(clippy::unwrap_used)]
 
-pub mod cross_thread;
-pub mod d3d12_window;
 pub mod log_capture;
-pub mod message_log;
-pub mod quiet_panics;
 pub mod ref_count;
-pub mod retour_installer;
-pub mod swap_window;
+pub mod rig_outcome;
+pub mod rig_request;
+pub mod surface_rig;
 pub mod test_host;
-pub mod test_sink;
-pub mod test_window;
 
 use amm_abi::types::{AmmDrawCmd, AmmMeshView, AmmSamplerKind, AmmTextureDelta, AmmVertex};
 use amm_ffi::types::{AmmHostFrame, AmmHostLayer};
+use amml_abi::AmmlDrawSurface;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_FLAG,
     D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-    D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Resource,
-    ID3D11Texture2D,
+    D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::core::Interface;
@@ -65,8 +60,22 @@ impl WarpTarget {
         (Self::SIZE, Self::SIZE)
     }
 
-    pub fn resource(&self) -> ID3D11Resource {
-        self.texture.cast().unwrap()
+    /// The draw surface of this target for device epoch `epoch`, as the loader writes it into a `FramePresent`.
+    pub fn surface(&self, epoch: u64) -> AmmlDrawSurface {
+        AmmlDrawSurface {
+            size: AmmlDrawSurface::SIZE_V1,
+            version: 1,
+            width: Self::SIZE,
+            height: Self::SIZE,
+            format: DXGI_FORMAT_R8G8B8A8_UNORM.0 as u32,
+            wrapped: 0,
+            _reserved: [0; 3],
+            device_epoch: epoch,
+            device: self.device.as_raw(),
+            context: self.ctx.as_raw(),
+            target: self.view.as_raw(),
+            back_buffer: self.texture.as_raw(),
+        }
     }
 
     /// A render target texture that can also be sampled.

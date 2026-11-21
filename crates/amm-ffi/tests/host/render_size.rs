@@ -1,4 +1,4 @@
-use amm_abi::types::{AMM_ABI_MAJOR, AmmCapability, AmmHandle, AmmRenderSize, AmmRenderSizeState, AmmStatus};
+use amm_abi::types::{AmmCapability, AmmHandle, AmmRenderSize, AmmRenderSizeState, AmmStatus};
 use amm_core::services::render::RenderSizeBook;
 use amm_core::structs::registry::ModIndex;
 use amm_ffi::host::{
@@ -26,14 +26,14 @@ impl SizeRig {
     }
 
     fn set(handle: AmmHandle, size: Option<AmmRenderSize>) -> AmmStatus {
-        let call = TestHost::api().set_render_size.unwrap_or_else(|| panic!("set_render_size"));
+        let call = TestHost::layers_table().set_render_size.unwrap_or_else(|| panic!("set_render_size"));
         let pointer = size.as_ref().map_or(std::ptr::null(), |size| size as *const AmmRenderSize);
         // SAFETY: the size lives for the call, or the pointer is null
         unsafe { call(handle, pointer) }
     }
 
     fn state(handle: AmmHandle) -> (AmmStatus, AmmRenderSizeState) {
-        let call = TestHost::api().render_size.unwrap_or_else(|| panic!("render_size"));
+        let call = TestHost::layers_table().render_size.unwrap_or_else(|| panic!("render_size"));
         let none = AmmRenderSize { width: 7, height: 7 };
         let mut state =
             AmmRenderSizeState { size: size_of::<AmmRenderSizeState>() as u32, wanted: none, actual: none, format: 7 };
@@ -62,7 +62,7 @@ impl SizeRig {
     }
 
     fn set_viewport(handle: AmmHandle, rect: [f32; 4]) {
-        let call = TestHost::api().set_game_viewport.unwrap_or_else(|| panic!("set_game_viewport"));
+        let call = TestHost::layers_table().set_game_viewport.unwrap_or_else(|| panic!("set_game_viewport"));
         // SAFETY: the rect lives for the call
         assert_eq!(unsafe { call(handle, &rect) }, AmmStatus::Ok);
     }
@@ -240,22 +240,12 @@ fn a_size_out_of_range_is_invalid_and_a_stale_handle_is_unknown() {
 fn a_null_state_pointer_is_null_pointer() {
     let host = TestHost::new();
     let client = SizeRig::holder(&host, "size-null");
-    let call = TestHost::api().render_size.unwrap_or_else(|| panic!("render_size"));
+    let call = TestHost::layers_table().render_size.unwrap_or_else(|| panic!("render_size"));
 
     // SAFETY: a null pointer is refused before any write
     let status = unsafe { call(client.handle(), std::ptr::null_mut()) };
 
     assert_eq!(status, AmmStatus::NullPointer);
-}
-
-#[test]
-fn the_render_size_slots_are_filled() {
-    let table = amm_ffi::api::amm_api_for(AMM_ABI_MAJOR);
-    // SAFETY: a non-null table is the manager's static table
-    let api = unsafe { table.as_ref() }.unwrap_or_else(|| panic!("table"));
-
-    assert!(api.set_render_size.is_some());
-    assert!(api.render_size.is_some());
 }
 
 #[test]

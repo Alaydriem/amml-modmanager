@@ -67,13 +67,7 @@ impl BenchHost {
     pub fn with_world_draw_client_without_frame() -> Self {
         let mut host = Self::new();
         let descriptor = Descriptors::with_claims("worldly", &[("WorldDraw", "Shared")]);
-        let callbacks = AmmCallbacks {
-            size: size_of::<AmmCallbacks>() as u32,
-            user: std::ptr::null_mut(),
-            frame: None,
-            textures_lost: None,
-        };
-        let handle = host.add_client_with(&descriptor, callbacks, Arc::new(FakeMesh::empty()));
+        let handle = host.add_client_with(&descriptor, None, Arc::new(FakeMesh::empty()));
         host.acquire(handle, Capability::WorldDraw);
         host
     }
@@ -106,12 +100,18 @@ impl BenchHost {
     pub fn add_client(&mut self, descriptor: &str, mesh: FakeMesh) -> AmmHandle {
         let mesh = Arc::new(mesh);
         let callbacks = FakeMesh::callbacks(&mesh);
-        self.add_client_with(descriptor, callbacks, mesh)
+        self.add_client_with(descriptor, Some(callbacks), mesh)
     }
 
-    fn add_client_with(&mut self, descriptor: &str, callbacks: AmmCallbacks, mesh: Arc<FakeMesh>) -> AmmHandle {
+    fn add_client_with(&mut self, descriptor: &str, callbacks: Option<AmmCallbacks>, mesh: Arc<FakeMesh>) -> AmmHandle {
         let dir = self.dir.path().join("mods").join(format!("mod-{}", self.clients.len())).join("config");
-        let registered = HostCell::global().with(|runtime| runtime.register(descriptor.as_bytes(), &dir, callbacks));
+        let registered = HostCell::global().with(|runtime| {
+            let handle = runtime.register(descriptor.as_bytes(), &dir)?;
+            if let Some(callbacks) = callbacks {
+                runtime.set_callbacks(handle, callbacks)?;
+            }
+            Ok(handle)
+        });
         self.clients.push(mesh);
         registered.unwrap_or_else(|status| panic!("register: {status:?}"))
     }

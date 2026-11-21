@@ -1,5 +1,5 @@
 use crate::services::input::ChordMatcher;
-use crate::structs::descriptor::{Capability, Chord, KeyScope, KeybindDecl};
+use crate::structs::descriptor::{Chord, KeyScope, KeybindDecl};
 use crate::structs::event::KeybindPhase;
 use crate::structs::input::{InputEvent, RouteContext, RouteDecision};
 use crate::structs::registry::{ModIndex, ModMask};
@@ -13,7 +13,7 @@ use crate::structs::toast::ToastKind;
 /// its release. While a mod has a focused text field, that mod gets every key press as a raw event and no
 /// keybind runs, except the manager toggle chord and the open panel. F3 is a modifier the router tracks
 /// itself: while it is down, every other key's chord has `f3` set, and F3 and any key with no F3 bind are kept
-/// from the game and from every mod. An exclusive Input holder is the exception: it gets them raw, as any other key.
+/// from the game and from every mod. Game input leases are the loader's, so no mod gets keys here as an input holder.
 /// `route` does not allocate.
 pub struct InputRouter {
     slots: ModMask,
@@ -50,34 +50,29 @@ impl InputRouter {
             InputEvent::Key { vk, mods, .. } => match ev.press() {
                 Some(press) => {
                     let chord = mods.chord_for(vk).with_f3(self.f3_held());
-                    self.route_press(press, vk, Some(chord), ctx, matcher)
+                    self.route_press(press, Some(chord), ctx, matcher)
                 }
                 None => Self::untracked(ctx),
             },
             InputEvent::PointerButton { .. } => match ev.press() {
-                Some(press) => self.route_press(press, press.0 as u32, None, ctx, matcher),
-                None => self.route_pointer(ctx, true, true, self.input_state(ctx)),
+                Some(press) => self.route_press(press, None, ctx, matcher),
+                None => self.route_pointer(ctx, true, true),
             },
-            InputEvent::PointerDelta { .. } => self.route_motion(ctx),
-            InputEvent::Wheel { .. } => self.route_pointer(ctx, true, true, self.input_state(ctx)),
-            InputEvent::PointerMove { .. } => self.route_pointer(ctx, false, true, self.input_state(ctx)),
+            InputEvent::PointerDelta { .. } => self.route_pointer(ctx, true, false),
+            InputEvent::Wheel { .. } => self.route_pointer(ctx, true, true),
+            InputEvent::PointerMove { .. } => self.route_pointer(ctx, false, true),
             InputEvent::Char(_) => self.route_char(ctx),
         }
-    }
-
-    /// The mods that got the down of `vk` as a raw event and are still owed its release.
-    pub fn held_targets(&self, vk: u32) -> ModMask {
-        Self::vk_slot(vk).map_or(ModMask::default(), |slot| self.raw_down[slot])
-    }
-
-    /// Whether the down of `vk` was kept from the game and its up has not arrived yet.
-    pub fn swallowed(&self, vk: u32) -> bool {
-        Self::vk_slot(vk).is_some_and(|slot| self.swallowed[slot])
     }
 
     /// The keybind that the down of `vk` pressed and whose release is still owed.
     pub fn held_keybind(&self, vk: u32) -> Option<(ModIndex, u16)> {
         self.bind_down[Self::vk_slot(vk)?]
+    }
+
+    /// Whether keybind `action` of the mod in `index` is held down: its press arrived and its release has not.
+    pub fn bind_held(&self, index: ModIndex, action: u16) -> bool {
+        self.bind_down.contains(&Some((index, action)))
     }
 
     /// Drops every release owed to a mod that left, so a new mod in its slot gets none of them.
@@ -88,17 +83,6 @@ impl InputRouter {
         for bind in self.bind_down.iter_mut() {
             if bind.is_some_and(|(owner, _)| owner == index) {
                 *bind = None;
-            }
-        }
-    }
-
-    /// Offers `release` every key and button the game saw go down and has not seen go up. Each one `release` takes
-    /// (it queued the game's up on the fake path) is kept from the game from now on, so its repeats and its real up
-    /// do not reach the game. A key `release` refuses stays with the game.
-    pub fn take_game_held(&mut self, mut release: impl FnMut(u32) -> bool) {
-        for slot in 0..InputEvent::VK_SLOTS {
-            if self.pressed[slot] && !self.swallowed[slot] && release(slot as u32) {
-                self.swallowed[slot] = true;
             }
         }
     }
@@ -114,7 +98,6 @@ impl InputRouter {
     fn route_press(
         &mut self,
         (slot, down, repeat): (usize, bool, bool),
-        vk: u32,
         chord: Option<Chord>,
         ctx: &RouteContext,
         matcher: &ChordMatcher,
@@ -135,7 +118,7 @@ impl InputRouter {
             self.panel_down[slot] = true;
             Self::panel()
         } else {
-            self.dispatch(slot, vk, chord, ctx, matcher)
+            self.dispatch(slot, chord, ctx, matcher)
         };
         self.swallowed[slot] = decision.consume_from_game;
         decision
@@ -167,12 +150,10 @@ impl InputRouter {
         }
     }
 
-    // The mod with a focused text field first (for keys), then live keybinds, then the Input holders, then
-    // the pointer owner (for buttons).
+    // The mod with a focused text field first (for keys), then live keybinds, then the pointer owner (for buttons).
     fn dispatch(
         &mut self,
         slot: usize,
-        vk: u32,
         chord: Option<Chord>,
         ctx: &RouteContext,
         matcher: &ChordMatcher,
@@ -186,19 +167,8 @@ impl InputRouter {
         if let Some(decision) = chord.and_then(|chord| self.keybind(slot, chord, ctx, matcher)) {
             return decision;
         }
-        let (holders, exclusive, full_block) = self.input_state(ctx);
-        if !exclusive && chord.is_some_and(|chord| chord.f3 || chord.key == Chord::F3) {
+        if chord.is_some_and(|chord| chord.f3 || chord.key == Chord::F3) {
             return RouteDecision { consume_from_game: true, ..RouteDecision::default() };
-        }
-        if !holders.is_empty() {
-            self.raw_down[slot] = holders;
-            let passes = !full_block
-                && holders.iter().all(|index| {
-                    ctx.registry
-                        .get(index)
-                        .is_some_and(|registered| registered.descriptor.input_passthrough.contains(&vk))
-                });
-            return RouteDecision { consume_from_game: !passes, raw_targets: holders, ..RouteDecision::default() };
         }
         let owner = ctx.pointer_owner.filter(|_| chord.is_none());
         match owner.map(|index| self.single(index)).filter(|mask| !mask.is_empty()) {
@@ -251,64 +221,12 @@ impl InputRouter {
 
     fn is_live(ctx: &RouteContext, index: ModIndex, decl: &KeybindDecl) -> bool {
         match decl.scope {
-            KeyScope::Global => ctx.arbiter.exclusive_holder(Capability::Input).is_none_or(|holder| holder == index),
+            KeyScope::Global => true,
             KeyScope::WhileHeld => ctx.arbiter.holds(index, decl.capability),
         }
     }
 
-    /// Whether the active exclusive Input holder asks for every real input to be kept from the game.
-    pub fn full_block_active(&self, ctx: &RouteContext) -> bool {
-        self.input_state(ctx).2
-    }
-
-    // The active Input holders (with an exclusive holder, only that holder), whether an exclusive holder
-    // exists, and whether it is active with a `full_block` claim. One holder lookup serves all three.
-    fn input_state(&self, ctx: &RouteContext) -> (ModMask, bool, bool) {
-        let holders = ctx.arbiter.holders(Capability::Input);
-        let Some(holder) = ctx.arbiter.exclusive_holder(Capability::Input) else {
-            return (ModMask(holders.0 & self.slots.0), false, false);
-        };
-        if !holders.contains(holder) {
-            return (ModMask::default(), true, false);
-        }
-        let full_block = ctx.registry.get(holder).is_some_and(|registered| {
-            registered.descriptor.claims.iter().any(|claim| claim.capability == Capability::Input && claim.full_block)
-        });
-        (ModMask(self.single(holder).0 & self.slots.0), true, full_block)
-    }
-
-    // Pointer motion goes to every Input holder as a raw event. The game keeps it only when every holder
-    // asks to pass it on.
-    fn route_motion(&self, ctx: &RouteContext) -> RouteDecision {
-        let state = self.input_state(ctx);
-        let full_block = state.2;
-        let decision = self.route_pointer(ctx, true, false, state);
-        if decision.to_panel || decision.raw_targets.is_empty() {
-            return decision;
-        }
-        let passes = !full_block && Self::passes_motion(ctx, decision.raw_targets);
-        RouteDecision { consume_from_game: !passes, ..decision }
-    }
-
-    fn passes_motion(ctx: &RouteContext, holders: ModMask) -> bool {
-        holders.iter().all(|index| {
-            ctx.registry.get(index).is_some_and(|registered| {
-                registered
-                    .descriptor
-                    .claims
-                    .iter()
-                    .any(|claim| claim.capability == Capability::Input && claim.pass_pointer_motion)
-            })
-        })
-    }
-
-    fn route_pointer(
-        &self,
-        ctx: &RouteContext,
-        raw: bool,
-        to_owner: bool,
-        (targets, _, full_block): (ModMask, bool, bool),
-    ) -> RouteDecision {
+    fn route_pointer(&self, ctx: &RouteContext, raw: bool, to_owner: bool) -> RouteDecision {
         if ctx.panel_open {
             return Self::panel();
         }
@@ -316,13 +234,6 @@ impl InputRouter {
         // still reaches the game
         if to_owner && ctx.over_menu_button {
             return RouteDecision { consume_from_game: raw, to_panel: true, ..RouteDecision::default() };
-        }
-        let holders = if raw { targets } else { ModMask::default() };
-        if full_block {
-            return RouteDecision { consume_from_game: true, raw_targets: holders, ..RouteDecision::default() };
-        }
-        if !holders.is_empty() {
-            return RouteDecision { consume_from_game: true, raw_targets: holders, ..RouteDecision::default() };
         }
         // a game screen shown in the game viewport is used through it: the game gets the pointer too
         let consume = raw && !ctx.over_game_viewport;
@@ -342,7 +253,6 @@ impl InputRouter {
             Some(target) if !target.is_empty() => {
                 RouteDecision { consume_from_game: true, raw_targets: target, ..RouteDecision::default() }
             }
-            _ if self.full_block_active(ctx) => RouteDecision { consume_from_game: true, ..RouteDecision::default() },
             _ => RouteDecision::default(),
         }
     }

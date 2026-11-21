@@ -21,8 +21,6 @@ const CTRL_SHIFT: Modifiers = Modifiers { ctrl: true, shift: true, alt: false };
 const TOGGLE_CHORD: Chord = Chord { key: 0x4D, ctrl: true, shift: true, alt: false, f3: false };
 
 const VK_CONTROL: u32 = 0x11;
-const VK_ESCAPE: u32 = 0x1B;
-const VK_F1: u32 = 0x70;
 const VK_F3: u32 = 0x72;
 const KEY_E: u32 = 0x45;
 const KEY_G: u32 = 0x47;
@@ -118,10 +116,6 @@ fn parse(text: &str) -> Descriptor {
 fn four_mods() -> (Rig, ModIndex, ModIndex, ModIndex) {
     let (rig, ids) = Rig::new(vec![parse(FREECAM), parse(DEJAVU), parse(MINIMAP)]);
     (rig, ids[0], ids[1], ids[2])
-}
-
-fn editor() -> Descriptor {
-    input_mod("editor", ClaimMode::Exclusive, false, false)
 }
 
 fn input_mod(id: &str, mode: ClaimMode, pass_pointer_motion: bool, block_player_turn: bool) -> Descriptor {
@@ -282,93 +276,8 @@ fn bind_blocked_by_exclusive_camera_is_consumed_and_names_the_holder() {
 }
 
 #[test]
-fn raw_key_goes_to_every_input_holder_and_is_consumed() {
-    let (mut rig, freecam, _, minimap) = four_mods();
-    rig.acquire(freecam, Capability::Input);
-    rig.acquire(minimap, Capability::Input);
-
-    let down = rig.route(key(KEY_G, true, NO_MODS));
-    let look = rig.route(InputEvent::PointerDelta { dx: 3.0, dy: -2.0 });
-    let up = rig.route(key(KEY_G, false, NO_MODS));
-
-    assert_eq!(down.raw_targets, mask(&[freecam, minimap]));
-    assert!(down.consume_from_game);
-    assert_eq!(down.keybind, None);
-    assert_eq!(look.raw_targets, mask(&[freecam, minimap]));
-    assert!(look.consume_from_game);
-    assert_eq!(up.raw_targets, mask(&[freecam, minimap]));
-    assert!(up.consume_from_game);
-}
-
-#[test]
-fn passthrough_key_reaches_the_game_only_if_every_holder_lists_it() {
-    let second = Descriptor { input_passthrough: vec![VK_ESCAPE], ..parse(MINIMAP) };
-    let (mut rig, ids) = Rig::new(vec![parse(FREECAM), second]);
-    let (freecam, minimap) = (ids[0], ids[1]);
-    rig.acquire(freecam, Capability::Input);
-    rig.acquire(minimap, Capability::Input);
-
-    let f1 = rig.route(key(VK_F1, true, NO_MODS));
-    let escape = rig.route(key(VK_ESCAPE, true, NO_MODS));
-    let escape_up = rig.route(key(VK_ESCAPE, false, NO_MODS));
-
-    assert_eq!(f1.raw_targets, mask(&[freecam, minimap]));
-    assert!(f1.consume_from_game);
-    assert_eq!(escape.raw_targets, mask(&[freecam, minimap]));
-    assert!(!escape.consume_from_game);
-    assert!(!escape_up.consume_from_game);
-
-    let (mut alone, ids) = Rig::new(vec![parse(FREECAM)]);
-    alone.acquire(ids[0], Capability::Input);
-    assert!(!alone.route(key(VK_F1, true, NO_MODS)).consume_from_game);
-}
-
-#[test]
-fn blocked_input_holder_gets_no_raw_events() {
-    let (mut rig, ids) = Rig::new(vec![parse(FREECAM), editor()]);
-    let (freecam, editor) = (ids[0], ids[1]);
-    rig.acquire(freecam, Capability::Input);
-    rig.acquire(editor, Capability::Input);
-
-    let down = rig.route(key(KEY_G, true, NO_MODS));
-    let button = rig.route(InputEvent::PointerButton { button: 1, down: true, x: 0.0, y: 0.0 });
-    let wheel = rig.route(InputEvent::Wheel { delta: -1.0 });
-
-    assert_eq!(down.raw_targets, mask(&[editor]));
-    assert!(down.consume_from_game);
-    assert_eq!(button.raw_targets, mask(&[editor]));
-    assert_eq!(wheel.raw_targets, mask(&[editor]));
-}
-
-#[test]
-fn key_up_reaches_the_mod_that_got_the_key_down_after_it_is_suspended() {
-    let (mut rig, ids) = Rig::new(vec![parse(FREECAM), editor()]);
-    let (freecam, editor) = (ids[0], ids[1]);
-    rig.acquire(freecam, Capability::Input);
-    let raw_down = rig.route(key(KEY_G, true, NO_MODS));
-    let bind_down = rig.route(key(KEY_W, true, NO_MODS));
-    assert_eq!(raw_down.raw_targets, mask(&[freecam]));
-
-    rig.acquire(editor, Capability::Input);
-    assert!(!rig.arbiter.holds(freecam, Capability::Input));
-    let raw_up = rig.route(key(KEY_G, false, NO_MODS));
-    let bind_up = rig.route(key(KEY_W, false, NO_MODS));
-
-    let fly_forward = rig.action(freecam, "fly_forward");
-    assert_eq!(bind_down.keybind, Some((freecam, fly_forward, KeybindPhase::Pressed)));
-    assert_eq!(raw_up.raw_targets, mask(&[freecam]));
-    assert!(raw_up.consume_from_game);
-    assert_eq!(bind_up.keybind, Some((freecam, fly_forward, KeybindPhase::Released)));
-    assert!(bind_up.raw_targets.is_empty());
-
-    let next = rig.route(key(KEY_G, true, NO_MODS));
-    assert_eq!(next.raw_targets, mask(&[editor]));
-}
-
-#[test]
-fn keys_pressed_while_the_panel_is_open_never_reach_the_holder() {
-    let (mut rig, freecam, _, _) = four_mods();
-    rig.acquire(freecam, Capability::Input);
+fn keys_pressed_while_the_panel_is_open_never_reach_a_mod_or_the_game() {
+    let (mut rig, _, _, _) = four_mods();
     rig.panel_open = true;
     rig.route(key(KEY_G, true, NO_MODS));
     rig.route(key(KEY_W, true, NO_MODS));
@@ -387,7 +296,8 @@ fn keys_pressed_while_the_panel_is_open_never_reach_the_holder() {
     }
 
     let fresh = rig.route(key(KEY_G, true, NO_MODS));
-    assert_eq!(fresh.raw_targets, mask(&[freecam]));
+    assert!(fresh.raw_targets.is_empty());
+    assert!(!fresh.consume_from_game);
 }
 
 struct Chords;
@@ -560,60 +470,6 @@ fn a_click_in_the_game_viewport_reaches_the_game_and_the_layer_owner() {
 const MOTION: InputEvent = InputEvent::PointerDelta { dx: 3.0, dy: -2.0 };
 
 #[test]
-fn motion_is_consumed_for_an_input_holder_by_default() {
-    let (mut rig, ids) = Rig::new(vec![input_mod("plain", ClaimMode::Shared, false, false)]);
-    rig.acquire(ids[0], Capability::Input);
-
-    let decision = rig.route(MOTION);
-
-    assert!(decision.consume_from_game);
-    assert_eq!(decision.raw_targets, mask(&[ids[0]]));
-}
-
-#[test]
-fn motion_reaches_the_game_when_every_holder_passes_it() {
-    let (mut rig, ids) = Rig::new(vec![input_mod("look", ClaimMode::Shared, true, false)]);
-    rig.acquire(ids[0], Capability::Input);
-
-    let decision = rig.route(MOTION);
-
-    assert!(!decision.consume_from_game);
-    assert_eq!(decision.raw_targets, mask(&[ids[0]]));
-    assert!(!decision.to_panel);
-}
-
-#[test]
-fn motion_is_consumed_when_any_holder_does_not_pass_it() {
-    let (mut rig, ids) = Rig::new(vec![
-        input_mod("look", ClaimMode::Shared, true, false),
-        input_mod("plain", ClaimMode::Shared, false, false),
-    ]);
-    rig.acquire(ids[0], Capability::Input);
-    rig.acquire(ids[1], Capability::Input);
-
-    let decision = rig.route(MOTION);
-
-    assert!(decision.consume_from_game);
-    assert_eq!(decision.raw_targets, mask(&[ids[0], ids[1]]));
-}
-
-#[test]
-fn wheel_and_buttons_stay_consumed_with_motion_passthrough() {
-    let (mut rig, ids) = Rig::new(vec![input_mod("look", ClaimMode::Shared, true, false)]);
-    rig.acquire(ids[0], Capability::Input);
-
-    let wheel = rig.route(InputEvent::Wheel { delta: 1.0 });
-    let button = rig.route(InputEvent::PointerButton { button: 1, down: true, x: 0.0, y: 0.0 });
-    let moved = rig.route(InputEvent::PointerMove { x: 1.0, y: 1.0 });
-
-    assert!(wheel.consume_from_game);
-    assert_eq!(wheel.raw_targets, mask(&[ids[0]]));
-    assert!(button.consume_from_game);
-    assert_eq!(button.raw_targets, mask(&[ids[0]]));
-    assert!(!moved.consume_from_game);
-}
-
-#[test]
 fn the_panel_still_takes_motion() {
     let (mut rig, ids) = Rig::new(vec![input_mod("look", ClaimMode::Shared, true, false)]);
     rig.acquire(ids[0], Capability::Input);
@@ -624,35 +480,6 @@ fn the_panel_still_takes_motion() {
     assert!(decision.to_panel);
     assert!(decision.consume_from_game);
     assert!(decision.raw_targets.is_empty());
-}
-
-#[test]
-fn motion_passthrough_does_not_depend_on_block_player_turn() {
-    let (mut rig, ids) = Rig::new(vec![input_mod("look", ClaimMode::Shared, true, true)]);
-    rig.acquire(ids[0], Capability::Input);
-
-    let decision = rig.route(MOTION);
-
-    assert!(!decision.consume_from_game);
-    assert_eq!(decision.raw_targets, mask(&[ids[0]]));
-}
-
-#[test]
-fn dejavu_exclusive_input_alone_decides_motion() {
-    let (mut rig, ids) = Rig::new(vec![
-        input_mod("shared", ClaimMode::Shared, false, false),
-        input_mod("dejavu", ClaimMode::Exclusive, true, false),
-    ]);
-    let (shared, dejavu) = (ids[0], ids[1]);
-    rig.acquire(shared, Capability::Input);
-    assert!(rig.route(MOTION).consume_from_game);
-
-    rig.acquire(dejavu, Capability::Input);
-    assert!(!rig.arbiter.holds(shared, Capability::Input));
-    let decision = rig.route(MOTION);
-
-    assert!(!decision.consume_from_game);
-    assert_eq!(decision.raw_targets, mask(&[dejavu]));
 }
 
 fn assert_swallowed(decision: RouteDecision) {
@@ -791,136 +618,28 @@ fn toggle_chord_with_f3_held_does_not_toggle() {
 }
 
 #[test]
-fn an_exclusive_input_holder_gets_f3_and_keys_held_with_it_raw() {
-    let mut replay = editor();
-    replay.input_passthrough = vec![VK_F3];
-    let (mut rig, ids) = Rig::new(vec![parse(FREECAM), replay]);
-    let (freecam, replay) = (ids[0], ids[1]);
-    rig.rebind(&[(freecam, "toggle", Chords::f3(KEY_G))]);
-    rig.acquire(replay, Capability::Input);
-
-    let f3_down = rig.route(key(VK_F3, true, NO_MODS));
-    let g_down = rig.route(key(KEY_G, true, NO_MODS));
-    let g_up = rig.route(key(KEY_G, false, NO_MODS));
-    let f3_up = rig.route(key(VK_F3, false, NO_MODS));
-
-    for decision in [f3_down, g_down, g_up, f3_up] {
-        assert_eq!(decision.raw_targets, mask(&[replay]), "{decision:?}");
-        assert_eq!(decision.keybind, None, "{decision:?}");
-    }
-    assert!(!f3_down.consume_from_game);
-    assert!(g_down.consume_from_game);
-}
-
-fn headless_rig() -> (Rig, ModIndex) {
-    let (mut rig, ids) = Rig::new(vec![parse(FREECAM), parse(HEADLESS)]);
-    rig.acquire(ids[1], Capability::Input);
-    (rig, ids[1])
-}
-
-#[test]
-fn full_block_consumes_a_passthrough_key() {
-    let (mut rig, headless) = headless_rig();
-
-    let down = rig.route(key(KEY_W, true, NO_MODS));
-    let up = rig.route(key(KEY_W, false, NO_MODS));
-
-    assert!(down.consume_from_game);
-    assert_eq!(down.raw_targets, mask(&[headless]));
-    assert!(up.consume_from_game);
-}
-
-#[test]
-fn full_block_consumes_f3() {
-    let (mut rig, headless) = headless_rig();
-
-    let down = rig.route(key(VK_F3, true, NO_MODS));
-
-    assert!(down.consume_from_game);
-    assert_eq!(down.raw_targets, mask(&[headless]));
-}
-
-#[test]
-fn full_block_consumes_pointer_buttons_wheel_and_motion() {
-    let (mut rig, _) = headless_rig();
-    rig.over_game_viewport = true;
-
-    let events = [
-        InputEvent::PointerButton { button: 0, down: true, x: 1.0, y: 1.0 },
-        InputEvent::PointerButton { button: 0, down: false, x: 1.0, y: 1.0 },
-        InputEvent::Wheel { delta: 1.0 },
-        InputEvent::PointerDelta { dx: 1.0, dy: 1.0 },
-        InputEvent::PointerMove { x: 2.0, y: 2.0 },
-        InputEvent::Char(u32::from('a')),
-    ];
-    for event in events {
-        assert!(rig.route(event).consume_from_game, "{event:?}");
-    }
-}
-
-#[test]
-fn full_block_keeps_the_toggle_chord() {
-    let (mut rig, _) = headless_rig();
-
-    let decision = rig.route(key(KEY_M, true, CTRL_SHIFT));
-
-    assert!(decision.toggle_panel);
-}
-
-#[test]
-fn full_block_ends_with_the_lease() {
-    let (mut rig, headless) = headless_rig();
-    assert!(rig.route(key(KEY_W, true, NO_MODS)).consume_from_game);
-    rig.route(key(KEY_W, false, NO_MODS));
-
-    rig.arbiter.release(headless, Capability::Input, &mut rig.hub);
-
-    assert!(!rig.route(key(KEY_W, true, NO_MODS)).consume_from_game);
-    assert!(!rig.route(InputEvent::PointerDelta { dx: 1.0, dy: 1.0 }).consume_from_game);
-}
-
-#[test]
-fn panel_open_then_closed_resumes_the_block_only_with_the_lease() {
-    let (mut rig, headless) = headless_rig();
-
-    rig.panel_open = true;
-    let while_open = rig.route(key(KEY_W, true, NO_MODS));
-    rig.route(key(KEY_W, false, NO_MODS));
-    assert!(while_open.to_panel);
-    assert!(while_open.raw_targets.is_empty());
-
-    rig.panel_open = false;
-    let resumed = rig.route(key(KEY_W, true, NO_MODS));
-    rig.route(key(KEY_W, false, NO_MODS));
-    assert!(!resumed.to_panel);
-    assert!(resumed.consume_from_game);
-    assert_eq!(resumed.raw_targets, mask(&[headless]));
-
-    rig.arbiter.release(headless, Capability::Input, &mut rig.hub);
-    rig.panel_open = true;
-    rig.route(key(KEY_W, true, NO_MODS));
-    rig.route(key(KEY_W, false, NO_MODS));
-    rig.panel_open = false;
-    assert!(!rig.route(key(KEY_W, true, NO_MODS)).consume_from_game);
-}
-
-#[test]
-fn take_game_held_marks_the_keys_the_game_saw_that_it_took() {
+fn an_input_lease_gets_no_raw_keys_or_motion_from_the_manager() {
     let (mut rig, ids) = Rig::new(vec![parse(HEADLESS)]);
-    assert!(!rig.route(key(KEY_L, true, NO_MODS)).consume_from_game);
-    assert!(!rig.route(key(KEY_Z, true, NO_MODS)).consume_from_game);
-    let mut offered = Vec::new();
-
-    rig.router.take_game_held(|vk| {
-        offered.push(vk);
-        vk == KEY_Z
-    });
-
-    assert_eq!(offered, vec![KEY_L, KEY_Z]);
-    assert!(rig.router.swallowed(KEY_Z));
-    assert!(!rig.router.swallowed(KEY_L));
     rig.acquire(ids[0], Capability::Input);
-    assert!(rig.route(repeat(KEY_Z, NO_MODS)).consume_from_game);
-    assert!(rig.route(key(KEY_Z, false, NO_MODS)).consume_from_game);
-    assert!(!rig.route(key(KEY_L, false, NO_MODS)).consume_from_game);
+
+    let key = rig.route(key(KEY_G, true, NO_MODS));
+    let motion = rig.route(InputEvent::PointerDelta { dx: 3.0, dy: 1.0 });
+    let button = rig.route(InputEvent::PointerButton { button: 0, down: true, x: 1.0, y: 1.0 });
+
+    for decision in [key, motion, button] {
+        assert!(decision.raw_targets.is_empty());
+        assert!(!decision.consume_from_game);
+    }
+}
+
+#[test]
+fn a_held_keybind_is_down_until_its_release() {
+    let (mut rig, freecam, _, _) = four_mods();
+    let toggle = rig.action(freecam, "toggle");
+
+    rig.route(key(KEY_P, true, CTRL));
+    assert!(rig.router.bind_held(freecam, toggle));
+
+    rig.route(key(KEY_P, false, CTRL));
+    assert!(!rig.router.bind_held(freecam, toggle));
 }

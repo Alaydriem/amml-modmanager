@@ -20,6 +20,15 @@ impl PairKey {
         PairKey { capability, first: first.to_string(), second: second.to_string() }
     }
 
+    pub fn capability(&self) -> Capability {
+        self.capability
+    }
+
+    /// The two mod ids, in sorted order.
+    pub fn ids(&self) -> (&str, &str) {
+        (&self.first, &self.second)
+    }
+
     /// The HCL attribute name this key is written under.
     pub fn attribute_name(&self) -> String {
         format!(

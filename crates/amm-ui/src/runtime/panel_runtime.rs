@@ -12,7 +12,7 @@ use egui::{Context, RawInput, Rect};
 
 use crate::model::{PanelAction, PanelController, PanelIntent, PanelModel};
 use crate::runtime::{IconTextures, PanelLocale};
-use crate::views::PanelLayout;
+use crate::views::{HeaderView, PanelLayout};
 
 /// The manager's own egui pass: the panel, the toasts and the menu button. It owns the
 /// egui context, the panel state and the reused event, intent and action buffers. The host runs it
@@ -32,6 +32,8 @@ pub struct PanelRuntime {
     actions: Vec<PanelAction>,
     // the menu button's rect in physical pixels from the last pass that drew it
     menu_button: Option<[f32; 4]>,
+    // the panel's close button rect in physical pixels from the last pass that drew the panel
+    close_button: Option<[f32; 4]>,
 }
 
 impl PanelRuntime {
@@ -51,6 +53,7 @@ impl PanelRuntime {
             intents: Vec::new(),
             actions: Vec::new(),
             menu_button: None,
+            close_button: None,
         }
     }
 
@@ -68,6 +71,7 @@ impl PanelRuntime {
         let icons = &self.icons;
         let intents = &mut self.intents;
         let mut corner = None;
+        self.ctx.data_mut(|data| data.remove::<Rect>(HeaderView::close_id()));
         let mut output = self.ctx.run_ui(raw, |ui| corner = PanelLayout::show(ui, model, controller, icons, intents));
         let ppp = output.pixels_per_point;
         let primitives = self.ctx.tessellate(std::mem::take(&mut output.shapes), ppp);
@@ -75,6 +79,8 @@ impl PanelRuntime {
         MeshFlattener::flatten(&primitives, &output.textures_delta, &textures.read(), ppp, out);
         output.textures_delta.clear();
         self.menu_button = corner.map(|rect| Self::pixels(input, rect));
+        let close = self.ctx.data(|data| data.get_temp::<Rect>(HeaderView::close_id()));
+        self.close_button = close.map(|rect| Self::pixels(input, rect));
         self.apply_intents();
         &self.actions
     }
@@ -83,6 +89,11 @@ impl PanelRuntime {
     /// when it drew none.
     pub fn menu_button_rect(&self) -> Option<[f32; 4]> {
         self.menu_button
+    }
+
+    /// Where the last pass drew the panel's close button in physical pixels, or `None` when it drew no panel.
+    pub fn close_button_rect(&self) -> Option<[f32; 4]> {
+        self.close_button
     }
 
     /// The device dropped every texture: the next pass sends the full font atlas again.

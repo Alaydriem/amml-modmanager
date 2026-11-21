@@ -1,6 +1,4 @@
 pub mod boundary;
-pub mod capture_relay;
-pub mod capture_slot;
 pub mod client_slot;
 pub mod frame_compositor;
 pub mod holder_book;
@@ -11,12 +9,11 @@ pub mod log_bridge;
 pub mod owner_frame_use;
 pub mod present_sequence;
 pub mod reentry_guard;
+pub mod table_gate;
 pub mod texture_budget;
 pub mod ui_event_buffer;
 
 pub use boundary::Boundary;
-pub use capture_relay::CaptureRelay;
-pub use capture_slot::CaptureSlot;
 pub use client_slot::ClientSlot;
 pub use frame_compositor::FrameCompositor;
 pub use holder_book::HolderBook;
@@ -27,5 +24,6 @@ pub use log_bridge::LogBridge;
 pub use owner_frame_use::OwnerFrameUse;
 pub use present_sequence::PresentSequence;
 pub use reentry_guard::ReentryGuard;
+pub use table_gate::TableGate;
 pub use texture_budget::TextureBudget;
 pub use ui_event_buffer::UiEventBuffer;

@@ -6,32 +6,26 @@ use arc_swap::ArcSwap;
 use hcl::eval::{Context, Evaluate};
 
 use crate::config::{ExclusiveResolution, ManagerConfig, PairKey, SuspensionResolution};
-use crate::errors::{CaptureError, ManagerError};
-use crate::services::capture::CaptureBook;
+use crate::errors::ManagerError;
 use crate::services::clash::ClashAnalyzer;
 use crate::services::descriptor::DescriptorChecker;
 use crate::services::event::EventHub;
 use crate::services::icon::IconBook;
-use crate::services::input::{
-    ChordMatcher, CursorSet, FakeKeys, FakeMove, FakePointer, GameViewportBook, InputRouter, KeyState, KeyWatch,
-};
+use crate::services::input::{ChordMatcher, CursorSet, GameViewportBook, InputRouter};
 use crate::services::lease::LeaseArbiter;
 use crate::services::menu::MenuEntries;
 use crate::services::registry::ModRegistry;
 use crate::services::render::RenderSizeBook;
-use crate::services::settings::{DraftBook, EffectiveKeys, ManagerConfigFile, SchemaChecker};
+use crate::services::settings::{ChordText, DraftBook, EffectiveKeys, ManagerConfigFile, SchemaChecker};
 use crate::services::snapshot::SnapshotBuilder;
 use crate::services::telemetry::Telemetry;
 use crate::services::toast::ToastQueue;
-use crate::structs::capture::{PendingCaptures, ScreenshotLayers};
 use crate::structs::clash::ClashReport;
 use crate::structs::descriptor::{ApplyMode, Capability, Chord, Descriptor, FieldKind, SettingField};
 use crate::structs::event::{KeybindPhase, ModEvent};
 use crate::structs::frame::{FrameReplyData, LayerKind, MenuScreen};
 use crate::structs::icon::{IconEntry, ModIcon};
-use crate::structs::input::{
-    FakeKeyOp, GameViewport, InputEvent, MoveIntent, PointerButton, PointerOp, RouteContext, RouteDecision,
-};
+use crate::structs::input::{GameViewport, InputEvent, RouteContext, RouteDecision};
 use crate::structs::lease::AcquireOutcome;
 use crate::structs::manager::{ManagedMod, TextureGrant};
 use crate::structs::menu::{MenuEntryId, MenuScreens};
@@ -68,35 +62,6 @@ pub struct ManagerService {
     keys: EffectiveKeys,
     matcher: ChordMatcher,
     router: InputRouter,
-    key_state: KeyState,
-    fake_keys: FakeKeys,
-    fake_pointer: FakePointer,
-    fake_move: FakeMove,
-    /// Every move entry resolved and the move hook is in, so a move intent reaches the game.
-    move_available: bool,
-    /// The game has a local player in an active world, as the last tick saw it.
-    player_ready: bool,
-    /// The game feed knows the keyboard controller, so a fake key reaches the game. Each tick sets it.
-    key_feed_ready: bool,
-    /// A down was refused for no keyboard controller, and the feed has not been ready since: the line is written.
-    no_key_feed_logged: bool,
-    /// A down was refused for a full key queue, and no down has gone in since: the line is written.
-    key_queue_full_logged: bool,
-    /// The game feed knows the mouse device, so a fake button or wheel turn reaches the game. Each tick sets it.
-    pointer_feed_ready: bool,
-    /// A button down or wheel turn was refused for no mouse device, and the feed has not been ready since: the line
-    /// is written.
-    no_pointer_feed_logged: bool,
-    key_watch: KeyWatch,
-    /// The mods that held an active `Input` lease at the last publish.
-    input_holders: ModMask,
-    /// The active exclusive `Input` holder with `full_block` at the last publish.
-    full_block_holder: Option<ModIndex>,
-    /// A focus loss came while a full-block holder was active: the holder kept its keys, and the full release runs
-    /// when its full block ends.
-    focus_lost_deferred: bool,
-    /// A full block ended after it kept a focus loss from the game, and the game has not seen a focus loss since.
-    focus_loss_owed: bool,
     cursor: CursorSet,
     viewports: GameViewportBook,
     render_size: RenderSizeBook,
@@ -107,7 +72,6 @@ pub struct ManagerService {
     /// than 1.5 never reads it, and cannot decode that event kind.
     locale_readers: ModMask,
     replies: LayerReplies,
-    captures: CaptureBook,
     mods: Vec<Option<ManagedMod>>,
     drafts: DraftBook,
     saves: SaveQueue,
@@ -119,15 +83,6 @@ pub struct ManagerService {
 impl ManagerService {
     /// How long the save status says "Saved" after a write goes out.
     pub const SAVED_SHOW_MS: u64 = SaveQueue::SAVED_SHOW_MS;
-    /// The warning when a fake key down is refused because the game feed has no keyboard controller yet. Written
-    /// once until the feed is ready.
-    pub const NO_KEY_FEED_LINE: &'static str = "fake key refused, the game feed has no keyboard controller yet";
-    /// The warning when a fake key down is refused because the key queue is full. Written once until a down goes in.
-    pub const KEY_QUEUE_FULL_LINE: &'static str = "fake key refused, the key queue is full";
-    /// The warning when a fake button down or wheel turn is refused because the game feed has no mouse device yet.
-    /// Written once until the feed is ready.
-    pub const NO_POINTER_FEED_LINE: &'static str = "fake mouse action refused, the game feed has no mouse device yet";
-
     /// `config_file` is the path and document of the manager's own `config.hcl`. With it, a change of an enabled
     /// flag or a resolution is written back there through the merge window; without it the change stays in memory.
     pub fn new(config: ManagerConfig, config_file: Option<(PathBuf, HclDocument)>) -> Self {
@@ -137,33 +92,20 @@ impl ManagerService {
         let hub = EventHub::new(slots, budgets.event_queue);
         let toasts = ToastQueue::new(budgets.toasts, budgets.toast_rate_ms);
         let snapshot = RenderSnapshot { menu_button: config.menu_button, ..RenderSnapshot::new() };
+        let registry = ModRegistry::new(slots);
+        let mut arbiter = LeaseArbiter::new();
+        arbiter.refresh_blocked(&registry, &config.resolutions);
         Self {
             checker,
             granter: TextureGranter::new(budgets),
-            registry: ModRegistry::new(slots),
-            arbiter: LeaseArbiter::new(),
+            registry,
+            arbiter,
             hub,
             toasts,
             analyzer: ClashAnalyzer::new(),
             keys: EffectiveKeys::new(),
             matcher: ChordMatcher::new(EffectiveKeys::CAPACITY),
             router: InputRouter::new(slots),
-            key_state: KeyState::new(),
-            fake_keys: FakeKeys::new(),
-            fake_pointer: FakePointer::new(),
-            fake_move: FakeMove::new(),
-            move_available: false,
-            player_ready: false,
-            key_feed_ready: false,
-            no_key_feed_logged: false,
-            key_queue_full_logged: false,
-            pointer_feed_ready: false,
-            no_pointer_feed_logged: false,
-            key_watch: KeyWatch::new(),
-            input_holders: ModMask::default(),
-            full_block_holder: None,
-            focus_lost_deferred: false,
-            focus_loss_owed: false,
             cursor: CursorSet::new(),
             viewports: GameViewportBook::new(),
             render_size: RenderSizeBook::new(),
@@ -172,7 +114,6 @@ impl ManagerService {
             icons: IconBook::new(slots),
             locale_readers: ModMask::default(),
             replies: LayerReplies::new(slots),
-            captures: CaptureBook::new(),
             mods: (0..slots).map(|_| None).collect(),
             drafts: DraftBook::new(slots, budgets.write_merge_ms),
             saves: SaveQueue::new(config_file, slots.max(1) * 2, budgets.write_merge_ms),
@@ -258,10 +199,7 @@ impl ManagerService {
         if self.registry.get(index).is_none() {
             return;
         }
-        self.release_fake_mod(index);
-        self.key_watch.forget(index);
         self.arbiter.release_all(index, &mut self.hub);
-        self.captures.forget(index);
         self.menu.forget(index);
         self.icons.forget(index);
         self.locale_readers.remove(index);
@@ -278,11 +216,12 @@ impl ManagerService {
         self.refresh();
     }
 
-    /// Asks for a lease. A disabled mod holds no leases, so its request is `NotPermitted`. A denial
-    /// pushes the denial toast, within its rate limit.
+    /// Asks for a lease. A disabled mod holds no leases, so its request is `NotPermitted`, as is a capability the
+    /// manager does not lease (`Input`, whose lease is the loader's). A denial pushes the denial toast, within its
+    /// rate limit.
     pub fn acquire(&mut self, index: ModIndex, cap: Capability, now_ms: u64) -> Result<AcquireOutcome, ManagerError> {
         let registered = self.registry.get(index).ok_or(ManagerError::UnknownMod)?;
-        if !registered.enabled {
+        if !registered.enabled || !Capability::MANAGER.contains(&cap) {
             return Err(ManagerError::NotPermitted);
         }
         let outcome = self.arbiter.acquire(&self.registry, &self.config.resolutions, index, cap, &mut self.hub);
@@ -301,52 +240,6 @@ impl ManagerService {
         }
         self.arbiter.release(index, cap, &mut self.hub);
         self.publish();
-    }
-
-    /// Books a screenshot of the next Present at the capture point `layers`, written to `path` as PNG, and returns
-    /// its sequence. See `CaptureBook::request` for the rules.
-    pub fn request_capture(
-        &mut self,
-        index: ModIndex,
-        path: &Path,
-        layers: ScreenshotLayers,
-    ) -> Result<u32, CaptureError> {
-        self.registry.get(index).ok_or(CaptureError::UnknownMod)?;
-        self.captures.request(&self.arbiter, index, path, layers)
-    }
-
-    /// True when the mod in `index` may ask for a capture: it holds an active `Hud` or `Overlay` lease.
-    pub fn may_capture(&self, index: ModIndex) -> bool {
-        CaptureBook::may_capture(&self.arbiter, index)
-    }
-
-    /// The captures that wait for the overlay. It does not allocate.
-    pub fn pending_captures(&self) -> PendingCaptures {
-        self.captures.pending()
-    }
-
-    /// The captures that wait for the overlay, marked taken. It does not allocate.
-    pub fn take_captures(&mut self) -> PendingCaptures {
-        self.captures.take()
-    }
-
-    /// See `CaptureBook::taken`. Returns true when the capture now waits for its write to `capture_path`.
-    pub fn capture_taken(&mut self, sequence: u32, ok: bool) -> bool {
-        self.captures.taken(sequence, ok, &mut self.hub)
-    }
-
-    /// Ages the pending captures by one manager tick and fails the ones the host has not taken in time. See
-    /// `CaptureBook::tick`.
-    pub fn tick_captures(&mut self) {
-        self.captures.tick(&mut self.hub);
-    }
-
-    pub fn capture_written(&mut self, sequence: u32, ok: bool) {
-        self.captures.written(sequence, ok, &mut self.hub);
-    }
-
-    pub fn capture_path(&self, sequence: u32) -> Option<&Path> {
-        self.captures.path(sequence)
     }
 
     /// True when a mod other than `index` holds an active lease on `cap`. Through the table it is answered on the
@@ -372,11 +265,6 @@ impl ManagerService {
             count += 1;
         }
         count
-    }
-
-    /// True when the key is down and the mod holds an active `Input` lease.
-    pub fn key_down(&self, index: ModIndex, vk: u32) -> bool {
-        self.arbiter.holds(index, Capability::Input) && self.key_state.is_down(vk)
     }
 
     /// A value a mod changed in play, as one HCL expression. The saved document and the draft take
@@ -407,13 +295,12 @@ impl ManagerService {
     }
 
     /// Frees the cursor for a mod or gives it back. Asking for a free cursor needs an active
-    /// `Input` or `Overlay` lease; giving it back is always allowed.
+    /// `Overlay` lease; giving it back is always allowed.
     pub fn set_cursor_mode(&mut self, index: ModIndex, on: bool) -> Result<(), ManagerError> {
         if self.registry.get(index).is_none() {
             return Err(ManagerError::UnknownMod);
         }
-        let holds = self.arbiter.holds(index, Capability::Input) || self.arbiter.holds(index, Capability::Overlay);
-        if on && !holds {
+        if on && !self.arbiter.holds(index, Capability::Overlay) {
             return Err(ManagerError::NotPermitted);
         }
         self.cursor.request(index, on);
@@ -426,18 +313,12 @@ impl ManagerService {
         self.replies.keyboard_owner(&self.snapshot.load().layers)
     }
 
-    /// Places one input event, pushes its keybind and raw events to the mods and its blocked toast
-    /// to the toast queue, and returns the decision for the caller (cancel the game event, toggle or
-    /// feed the panel). On focus loss every held key is released to the mods that got its down
-    /// before the key state is cleared, so no key stays down in a mod. While a full-block holder is active, a focus
-    /// loss is kept from the game and the holder keeps its keys; see `defer_focus_loss`.
+    /// Places one input event, pushes its keybind event to the mod and its blocked toast to the toast queue, and
+    /// returns the decision for the caller (cancel the game event, toggle or feed the panel, the layers it reaches).
+    /// On focus loss the `Released` phase of every keybind still pressed goes to its mod, so no bind stays down.
     pub fn route(&mut self, ev: &InputEvent, now_ms: u64) -> RouteDecision {
         let started = self.config.telemetry.then(Instant::now);
-        let holder = if *ev == InputEvent::FocusLost { self.full_block_holder_now() } else { None };
-        let decision = match holder {
-            Some(holder) => self.defer_focus_loss(holder),
-            None => self.route_event(ev, now_ms),
-        };
+        let decision = self.route_event(ev, now_ms);
         self.telemetry.record_event_drops(self.hub.dropped());
         if let Some(started) = started {
             self.telemetry.record_route(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
@@ -447,9 +328,7 @@ impl ManagerService {
 
     fn route_event(&mut self, ev: &InputEvent, now_ms: u64) -> RouteDecision {
         if *ev == InputEvent::FocusLost {
-            self.focus_lost_deferred = false;
-            self.focus_loss_owed = false;
-            self.release_held(None);
+            self.release_held();
         }
         self.panel.track(ev);
         let ctx = RouteContext {
@@ -463,47 +342,9 @@ impl ManagerService {
             arbiter: &self.arbiter,
             book: &self.config.resolutions,
         };
-        let mut decision = self.router.route(ev, &ctx, &self.matcher);
-        if let InputEvent::Key { vk, down: false, .. } = *ev
-            && self.fake_keys.is_held(vk)
-        {
-            decision.consume_from_game = true;
-        }
-        self.key_state.apply(ev);
-        if *ev == InputEvent::FocusLost {
-            self.release_fake_all();
-        }
-        self.deliver(ev, &decision, now_ms);
+        let decision = self.router.route(ev, &ctx, &self.matcher);
+        self.deliver(&decision, now_ms);
         decision
-    }
-
-    /// A focus loss while `holder` has an active full block. Every other mod gets the releases of its held keys
-    /// and keybinds and loses its fake keys, as on any focus loss. The holder keeps its held keys, keybinds and
-    /// fake keys, and the game does not see the focus loss. The full release runs when the holder's full block
-    /// ends.
-    fn defer_focus_loss(&mut self, holder: ModIndex) -> RouteDecision {
-        self.release_held(Some(holder));
-        self.release_fake_except(holder);
-        self.focus_lost_deferred = true;
-        RouteDecision { consume_from_game: true, ..RouteDecision::default() }
-    }
-
-    /// Lets go of the fake keys, buttons and move intent of every mod except `keep`. Each mod that lost one gets
-    /// `FakeKeysReleased`. Every up is queued: the window has lost focus, so no real key-up will reach the game.
-    fn release_fake_except(&mut self, keep: ModIndex) {
-        let mut lost = self.fake_keys.release_all_except(keep);
-        lost.0 |= self.fake_pointer.release_all_except(keep).0;
-        lost.0 |= self.fake_move.clear_except(keep).0;
-        for index in lost.iter() {
-            self.hub.push(index, ModEvent::FakeKeysReleased);
-        }
-    }
-
-    /// True once after a full block ended that had kept a focus loss from the game, unless the game has seen a
-    /// focus loss since. The caller then lets the game see one focus loss, so the game lets go of its own state
-    /// (for example its cursor clip) while the window is in the background.
-    pub fn take_focus_loss_owed(&mut self) -> bool {
-        std::mem::take(&mut self.focus_loss_owed)
     }
 
     /// Sets or clears (`None`) where the mod draws the game picture. It counts only while the mod holds `Overlay`.
@@ -580,8 +421,6 @@ impl ManagerService {
         }
         let id = registered.descriptor.id();
         if !enabled {
-            self.release_fake_mod(index);
-            self.key_watch.forget(index);
             self.arbiter.release_all(index, &mut self.hub);
             self.cursor.remove(index);
             self.forget_reply(index);
@@ -608,12 +447,9 @@ impl ManagerService {
         self.refresh();
     }
 
-    /// Opens or closes the panel. Opening it releases every fake key and button.
+    /// Opens or closes the panel.
     pub fn set_panel_open(&mut self, open: bool) {
         if self.panel.set_open(open) {
-            if open {
-                self.release_fake_all();
-            }
             self.publish();
         }
     }
@@ -820,212 +656,6 @@ impl ManagerService {
         }
     }
 
-    /// The world was left: every fake key and button and the move intent are released, and there is no local player
-    /// until a tick sees one again.
-    pub fn world_left(&mut self) {
-        self.player_ready = false;
-        self.release_fake_keys();
-    }
-
-    /// Lets go of every fake key and button and the move intent. Each mod that lost one gets `FakeKeysReleased`.
-    pub fn release_fake_keys(&mut self) {
-        self.release_fake_all();
-    }
-
-    /// Sets the keys the mod sees as `Key` events whatever else they do, unless a keybind or the panel took them.
-    /// It replaces the earlier set; an empty slice clears it. The mod needs an `Input` claim, else `NotPermitted`.
-    /// A code of 256 or more, or more than `KeyWatch::MAX_KEYS` keys, is `InvalidArgument`.
-    pub fn watch_keys(&mut self, index: ModIndex, vks: &[u32]) -> Result<(), ManagerError> {
-        self.require_input_claim(index)?;
-        if vks.len() > KeyWatch::MAX_KEYS || vks.iter().any(|vk| *vk >= InputEvent::VK_SLOTS as u32) {
-            return Err(ManagerError::InvalidArgument);
-        }
-        self.key_watch.set(index, vks);
-        Ok(())
-    }
-
-    /// Holds a key of the game down (`down`) or lets it go with a fake press. The mod needs an `Input` claim, else
-    /// `NotPermitted`; so is a call while the panel is open, and a down while any other mod holds an active `Input`
-    /// lease. A code of 256 or more is `InvalidArgument`. A down while the game feed has no keyboard controller is
-    /// `NotReady`, and a down that finds `FakeKeys::MAX_OPS` presses queued is `KeyQueueFull`; each writes one
-    /// warning per episode. An up is never refused for these: with no controller no down went in, and a release
-    /// always has room. A down for a key the mod holds, or an up for one it does not, sends nothing.
-    /// An up while the real key is down only drops the hold: the real key-up lets the game see the key go up.
-    pub fn send_key(&mut self, index: ModIndex, vk: u32, down: bool) -> Result<(), ManagerError> {
-        self.require_input_claim(index)?;
-        if vk >= InputEvent::VK_SLOTS as u32 {
-            return Err(ManagerError::InvalidArgument);
-        }
-        let mut others = self.arbiter.holders(Capability::Input);
-        others.remove(index);
-        if self.panel.is_open() || (down && !others.is_empty()) {
-            return Err(ManagerError::NotPermitted);
-        }
-        if down {
-            if !self.key_feed_ready {
-                if !self.no_key_feed_logged {
-                    self.no_key_feed_logged = true;
-                    curia::warn!("fake key refused, the game feed has no keyboard controller yet", { vk: vk });
-                }
-                return Err(ManagerError::NotReady);
-            }
-            if !self.fake_keys.hold(index, vk) && !self.fake_keys.holds(index, vk) {
-                if !self.key_queue_full_logged {
-                    self.key_queue_full_logged = true;
-                    curia::warn!("fake key refused, the key queue is full", { vk: vk, queued: self.fake_keys.pending() });
-                }
-                return Err(ManagerError::KeyQueueFull);
-            }
-            self.key_queue_full_logged = false;
-        } else {
-            let mark = self.fake_keys.pending();
-            self.fake_keys.release(index, vk);
-            let (key_state, router) = (&self.key_state, &self.router);
-            self.fake_keys.drop_ups_since(mark, |code| key_state.is_down(code) && !router.swallowed(code));
-        }
-        Ok(())
-    }
-
-    /// Moves the fake key presses the game must see into `out`, oldest first.
-    pub fn take_fake_keys(&mut self, out: &mut Vec<FakeKeyOp>) {
-        self.fake_keys.take_ops(out);
-    }
-
-    /// Holds a mouse button of the game down, lets it go, turns the wheel or turns the look, with a fake mouse
-    /// action. The rules of `send_key` apply: the mod needs an `Input` claim, else `NotPermitted`; so is a call while
-    /// the panel is open, and a button down, a wheel turn or a look turn while any other mod holds an active `Input`
-    /// lease. A wheel turn of more than `FakePointer::MAX_WHEEL_STEPS` notches either way, or a look turn of more
-    /// than `FakePointer::MAX_TURN_MILLIDEGREES` either way, is `InvalidArgument`; one of 0 sends nothing. Look
-    /// turns of one axis add into one pending value, so a turn never meets a full queue. A
-    /// down for a button the mod holds, or an up for one it does not, sends nothing. A button down or a wheel turn
-    /// while the game feed has no mouse device is `NotReady`, with one warning per episode; a button up and a look
-    /// turn are never refused for it. A call while the queue is full of button actions is `PointerQueueFull`, and
-    /// the button state stays as it was.
-    pub fn send_pointer(&mut self, index: ModIndex, op: PointerOp) -> Result<(), ManagerError> {
-        self.require_input_claim(index)?;
-        if let PointerOp::Wheel { steps } = op
-            && steps.unsigned_abs() > FakePointer::MAX_WHEEL_STEPS.unsigned_abs()
-        {
-            return Err(ManagerError::InvalidArgument);
-        }
-        if let PointerOp::Turn { millidegrees, .. } = op
-            && millidegrees.unsigned_abs() > FakePointer::MAX_TURN_MILLIDEGREES.unsigned_abs()
-        {
-            return Err(ManagerError::InvalidArgument);
-        }
-        let presses = !matches!(op, PointerOp::Button { down: false, .. });
-        let mut others = self.arbiter.holders(Capability::Input);
-        others.remove(index);
-        if self.panel.is_open() || (presses && !others.is_empty()) {
-            return Err(ManagerError::NotPermitted);
-        }
-        let needs_device = matches!(op, PointerOp::Button { down: true, .. })
-            || matches!(op, PointerOp::Wheel { steps } if steps != 0);
-        if needs_device && !self.pointer_feed_ready {
-            if !self.no_pointer_feed_logged {
-                self.no_pointer_feed_logged = true;
-                curia::warn!("fake mouse action refused, the game feed has no mouse device yet", {
-                    wheel: matches!(op, PointerOp::Wheel { .. }),
-                });
-            }
-            return Err(ManagerError::NotReady);
-        }
-        if !matches!(op, PointerOp::Turn { .. }) && !self.fake_pointer.has_room() {
-            return Err(ManagerError::PointerQueueFull);
-        }
-        match op {
-            PointerOp::Button { button, down: true } => {
-                self.fake_pointer.hold(index, button);
-            }
-            PointerOp::Button { button, down: false } => {
-                self.fake_pointer.release(index, button);
-            }
-            PointerOp::Wheel { steps: 0 } => {}
-            PointerOp::Wheel { steps } => {
-                self.fake_pointer.wheel(steps);
-            }
-            PointerOp::Turn { millidegrees: 0, .. } => {}
-            PointerOp::Turn { axis, millidegrees } => {
-                self.fake_pointer.turn(axis, millidegrees);
-            }
-        }
-        Ok(())
-    }
-
-    /// Moves the fake mouse actions the game must see into `out`, oldest first.
-    pub fn take_fake_pointer(&mut self, out: &mut Vec<PointerOp>) {
-        self.fake_pointer.take_ops(out);
-    }
-
-    /// How many fake mouse actions a full queue evicted or refused since the last call.
-    pub fn take_pointer_drops(&mut self) -> u64 {
-        self.fake_pointer.take_dropped()
-    }
-
-    /// Holds a movement of the local player until the mod sends another one or the manager clears it. The
-    /// all-zero intent is the clear: it is always `Ok` and sends no event. An axis outside -1.0 to 1.0 is
-    /// `InvalidArgument`. Any other intent is `Unsupported` while the move entries are missing, `NotPermitted`
-    /// unless the mod holds an active `Input` lease and the panel is closed, and `NotReady` while the game has no
-    /// local player in a world. A mod that sets an intent replaces the intent of another mod, which gets
-    /// `FakeKeysReleased`. The manager clears the intent, with `FakeKeysReleased` to its owner, on every path that
-    /// lets go of fake keys, and when the owner's `Input` lease ends.
-    pub fn send_move(&mut self, index: ModIndex, intent: MoveIntent) -> Result<(), ManagerError> {
-        self.registry.get(index).ok_or(ManagerError::UnknownMod)?;
-        if !intent.in_range() {
-            return Err(ManagerError::InvalidArgument);
-        }
-        if intent.is_zero() {
-            self.fake_move.set(index, intent);
-            return Ok(());
-        }
-        if !self.move_available {
-            return Err(ManagerError::Unsupported);
-        }
-        if self.panel.is_open() || !self.arbiter.holds(index, Capability::Input) {
-            return Err(ManagerError::NotPermitted);
-        }
-        if !self.player_ready {
-            return Err(ManagerError::NotReady);
-        }
-        if let Some(replaced) = self.fake_move.set(index, intent) {
-            self.hub.push(replaced, ModEvent::FakeKeysReleased);
-        }
-        Ok(())
-    }
-
-    /// The held move intent the game must see; all zero when no mod holds one.
-    pub fn move_intent(&self) -> MoveIntent {
-        self.fake_move.current()
-    }
-
-    /// Whether every move entry resolved and the move hook went in. Set at enable.
-    pub fn set_move_available(&mut self, available: bool) {
-        self.move_available = available;
-    }
-
-    /// Whether the game feed knows the keyboard controller. Each tick sets it; a ready feed ends the episode of the
-    /// no-controller warning.
-    pub fn set_key_feed_ready(&mut self, ready: bool) {
-        self.key_feed_ready = ready;
-        if ready {
-            self.no_key_feed_logged = false;
-        }
-    }
-
-    /// Whether the game feed knows the mouse device. Each tick sets it; a ready feed ends the episode of the
-    /// no-device warning.
-    pub fn set_pointer_feed_ready(&mut self, ready: bool) {
-        self.pointer_feed_ready = ready;
-        if ready {
-            self.no_pointer_feed_logged = false;
-        }
-    }
-
-    /// Whether the game has a local player in an active world. Each tick sets it.
-    pub fn set_player_ready(&mut self, ready: bool) {
-        self.player_ready = ready;
-    }
-
     /// Sends `WorldReloadApply` to each mod with a saved `WorldReload` change since the last load.
     pub fn world_loaded(&mut self) {
         for (slot, managed) in self.mods.iter_mut().enumerate() {
@@ -1037,6 +667,23 @@ impl ManagerService {
                 self.hub.push(ModIndex(slot), ModEvent::WorldReloadApply);
             }
         }
+    }
+
+    /// The chord keybind `action` of the mod in `index` uses now: the chord stored at its `config_path`, or its
+    /// default when that value is missing or not a chord. `None` for a slot with no mod or an action past its
+    /// descriptor's list.
+    pub fn keybind_chord(&self, index: ModIndex, action: u16) -> Option<Chord> {
+        let registered = self.registry.get(index)?;
+        let keybind = registered.descriptor.keybinds.get(usize::from(action))?;
+        let stored = self.document(index).and_then(|document| document.get(&keybind.config_path));
+        let chord = stored.as_ref().and_then(hcl::Value::as_str).and_then(ChordText::parse);
+        Some(chord.unwrap_or(keybind.default_chord))
+    }
+
+    /// Whether keybind `action` of the mod in `index` is held down: its `Pressed` event went out and its `Released`
+    /// has not.
+    pub fn keybind_down(&self, index: ModIndex, action: u16) -> bool {
+        self.registry.get(index).is_some() && self.router.bind_held(index, action)
     }
 
     /// Saves each draft whose window has passed, then yields the merged writes whose window has
@@ -1187,18 +834,13 @@ impl ManagerService {
         self.publish();
     }
 
-    // Takes mods that no longer hold Input or Overlay out of the cursor set, cancels the pending captures of mods
-    // that no longer hold Hud or Overlay, ends the size forced by a mod that no longer holds RenderSize, then swaps
-    // in a new snapshot.
+    // Takes mods that no longer hold Overlay out of the cursor set, ends the size forced by a mod that no longer holds
+    // RenderSize, then swaps in a new snapshot.
     fn publish(&mut self) {
-        self.track_full_block();
-        self.release_fake_for_new_input_holders();
-        self.release_unleased_move();
-        self.captures.cancel_unleased(&self.arbiter, &mut self.hub);
         self.render_size.drop_unleased(&self.arbiter);
         for registered in self.registry.iter() {
             let index = registered.index;
-            if !self.arbiter.holds(index, Capability::Input) && !self.arbiter.holds(index, Capability::Overlay) {
+            if !self.arbiter.holds(index, Capability::Overlay) {
                 self.cursor.remove(index);
             }
         }
@@ -1216,205 +858,31 @@ impl ManagerService {
             layers: SnapshotBuilder::layers(&self.registry, &self.arbiter, registered_seq),
             cursor_free: self.cursor.cursor_free(self.panel.is_open()),
             hide_vanilla_hud: SnapshotBuilder::hides_vanilla_hud(&self.registry, &self.arbiter),
-            blocks_player_turn: SnapshotBuilder::blocks_player_turn(&self.registry, &self.arbiter)
-                || self.full_block_holder.is_some(),
-            blocks_gamepad: self.full_block_holder.is_some(),
             panel_open: self.panel.is_open(),
             menu_button: self.panel.menu_button_allowed() && !self.panel.is_open(),
         }
     }
 
-    fn deliver(&mut self, ev: &InputEvent, decision: &RouteDecision, now_ms: u64) {
+    fn deliver(&mut self, decision: &RouteDecision, now_ms: u64) {
         if let Some((index, action, phase)) = decision.keybind {
             self.hub.push(index, ModEvent::Keybind { action, phase });
         }
         if let Some(toast) = decision.blocked {
             self.toasts.push(toast, now_ms);
         }
-        let Some(raw) = Self::raw_event(ev) else {
-            return;
-        };
-        for index in decision.raw_targets.iter() {
-            self.hub.push(index, raw);
-        }
-        if let ModEvent::Key { vk, .. } = raw
-            && !decision.consume_from_game
-            && !decision.to_panel
-        {
-            for index in self.key_watch.watchers(vk).iter().filter(|index| !decision.raw_targets.contains(*index)) {
-                self.hub.push(index, raw);
-            }
-        }
     }
 
-    // Sends the release of every key and button still down to the mods that got its down, and the
-    // Released phase of every keybind still pressed. With `keep`, that mod gets none and keeps them in the router;
-    // the router forgets what it owed every other mod.
-    fn release_held(&mut self, keep: Option<ModIndex>) {
-        let mut released = ModMask::default();
+    // Sends the Released phase of every keybind still pressed to its mod.
+    fn release_held(&mut self) {
         for vk in 0..InputEvent::VK_SLOTS as u32 {
-            let mut targets = self.router.held_targets(vk);
-            if let Some(keep) = keep {
-                targets.remove(keep);
-            }
-            released.0 |= targets.0;
-            if !targets.is_empty() {
-                let (x, y) = self.panel.pointer();
-                let up = match InputEvent::button_for_vk(vk) {
-                    Some(button) => ModEvent::PointerButton { button, down: false, x, y },
-                    None => ModEvent::Key { vk, down: false, repeat: false },
-                };
-                for index in targets.iter() {
-                    self.hub.push(index, up);
-                }
-            }
-            if let Some((index, action)) = self.router.held_keybind(vk).filter(|(index, _)| Some(*index) != keep) {
-                released.insert(index);
+            if let Some((index, action)) = self.router.held_keybind(vk) {
                 self.hub.push(index, ModEvent::Keybind { action, phase: KeybindPhase::Released });
             }
-        }
-        if keep.is_some() {
-            for index in released.iter() {
-                self.router.forget(index);
-            }
-        }
-    }
-
-    // The full release of a focus loss: held keys and keybinds, the router, the key state, then every fake key and
-    // button.
-    fn release_focus_all(&mut self) {
-        self.release_held(None);
-        self.router.clear();
-        self.key_state.apply(&InputEvent::FocusLost);
-        self.release_fake_all();
-    }
-
-    // When the full block of a holder ends, a focus loss it kept from the game runs its full release and the game
-    // is owed that focus loss; without one, the holder's fake keys and buttons are let go. When a full block starts,
-    // the keys and buttons the game saw go down are let go on the fake path.
-    fn track_full_block(&mut self) {
-        let holder = self.full_block_holder_now();
-        if holder == self.full_block_holder {
-            return;
-        }
-        let ended = std::mem::replace(&mut self.full_block_holder, holder);
-        if std::mem::take(&mut self.focus_lost_deferred) {
-            self.release_focus_all();
-            self.focus_loss_owed = true;
-        } else if let Some(ended) = ended {
-            self.release_fake_mod(ended);
-        }
-        if holder.is_some() {
-            self.release_game_held();
-        }
-    }
-
-    // Queues the game's up of every real key and button it saw go down, and keeps their repeats and real ups from
-    // it. A key or button a mod holds with a fake press stays down: that mod's release sends its up.
-    fn release_game_held(&mut self) {
-        let (fake_keys, fake_pointer) = (&mut self.fake_keys, &mut self.fake_pointer);
-        self.router.take_game_held(|vk| match InputEvent::button_for_vk(vk) {
-            Some(number) => PointerButton::from_number(number)
-                .is_some_and(|button| fake_pointer.is_held(button) || fake_pointer.queue_game_up(button)),
-            None => fake_keys.is_held(vk) || fake_keys.queue_game_up(vk),
-        });
-    }
-
-    // The active exclusive Input holder, while its claim has `full_block`. The answer reads only the leases and the
-    // registry, so the pointer and keyboard owners are left out of the context.
-    fn full_block_holder_now(&self) -> Option<ModIndex> {
-        let ctx = RouteContext {
-            panel_open: self.panel.is_open(),
-            toggle_chord: self.config.toggle_chord,
-            pointer_owner: None,
-            keyboard_owner: None,
-            over_menu_button: false,
-            over_game_viewport: false,
-            registry: &self.registry,
-            arbiter: &self.arbiter,
-            book: &self.config.resolutions,
-        };
-        if !self.router.full_block_active(&ctx) {
-            return None;
-        }
-        self.arbiter.exclusive_holder(Capability::Input)
-    }
-
-    // A mod that gained an active `Input` lease takes the keyboard and mouse: the fake keys and buttons of every other
-    // mod are released.
-    fn release_fake_for_new_input_holders(&mut self) {
-        let current = self.arbiter.holders(Capability::Input);
-        let gained = ModMask(current.0 & !self.input_holders.0);
-        self.input_holders = current;
-        if gained.is_empty() {
-            return;
-        }
-        for slot in 0..ModMask::CAPACITY as u8 {
-            if !gained.contains(ModIndex(slot)) {
-                self.release_fake_mod(ModIndex(slot));
-            }
-        }
-    }
-
-    // The owner of the move intent no longer holds an active `Input` lease: the intent is cleared and the owner gets
-    // `FakeKeysReleased`.
-    fn release_unleased_move(&mut self) {
-        let Some(owner) = self.fake_move.owner() else {
-            return;
-        };
-        if !self.arbiter.holds(owner, Capability::Input) {
-            let lost = self.fake_move.clear_mod(owner);
-            self.finish_fake_release(self.fake_keys.pending(), lost);
-        }
-    }
-
-    fn require_input_claim(&self, index: ModIndex) -> Result<(), ManagerError> {
-        let registered = self.registry.get(index).ok_or(ManagerError::UnknownMod)?;
-        if registered.descriptor.claims.iter().any(|claim| claim.capability == Capability::Input) {
-            Ok(())
-        } else {
-            Err(ManagerError::NotPermitted)
-        }
-    }
-
-    // Lets go of every fake key and button and the move intent. Each mod that lost one gets `FakeKeysReleased`. A
-    // key whose real key is down gets no up, because the real key-up reaches the game.
-    fn release_fake_all(&mut self) {
-        let mark = self.fake_keys.pending();
-        let mut lost = self.fake_keys.release_all();
-        lost.0 |= self.fake_pointer.release_all().0;
-        lost.0 |= self.fake_move.clear_all().0;
-        self.finish_fake_release(mark, lost);
-    }
-
-    fn release_fake_mod(&mut self, index: ModIndex) {
-        let mark = self.fake_keys.pending();
-        let mut lost = self.fake_keys.release_mod(index);
-        lost.0 |= self.fake_pointer.release_mod(index).0;
-        lost.0 |= self.fake_move.clear_mod(index).0;
-        self.finish_fake_release(mark, lost);
-    }
-
-    fn finish_fake_release(&mut self, mark: usize, lost: ModMask) {
-        let (key_state, router) = (&self.key_state, &self.router);
-        self.fake_keys.drop_ups_since(mark, |vk| key_state.is_down(vk) && !router.swallowed(vk));
-        for index in lost.iter() {
-            self.hub.push(index, ModEvent::FakeKeysReleased);
         }
     }
 
     fn forget_reply(&mut self, index: ModIndex) {
         self.replies.forget(index);
-    }
-
-    fn raw_event(ev: &InputEvent) -> Option<ModEvent> {
-        match *ev {
-            InputEvent::Key { vk, down, repeat, .. } => Some(ModEvent::Key { vk, down, repeat }),
-            InputEvent::PointerButton { button, down, x, y } => Some(ModEvent::PointerButton { button, down, x, y }),
-            InputEvent::PointerDelta { dx, dy } => Some(ModEvent::PointerDelta { dx, dy }),
-            InputEvent::Wheel { delta } => Some(ModEvent::Wheel { delta }),
-            InputEvent::PointerMove { .. } | InputEvent::Char(_) | InputEvent::FocusLost => None,
-        }
     }
 
     fn field<'a>(descriptor: &'a Descriptor, path: &str) -> Option<&'a SettingField> {

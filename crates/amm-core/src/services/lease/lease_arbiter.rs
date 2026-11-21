@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::config::{ExclusiveResolution, PairKey, ResolutionBook, SuspensionResolution};
 use crate::services::event::EventHub;
 use crate::services::registry::ModRegistry;
@@ -16,12 +18,18 @@ use crate::structs::registry::{ModIndex, ModMask};
 /// rebuilt by `refresh_blocked` and by every `acquire`. `blocked` is derived from them and the lease
 /// state, and is recomputed on every lease change. After a registration, an enable or disable, or a
 /// resolution change, the manager calls `refresh_blocked`.
+///
+/// It also keeps the input lease ranking for the loader: the mods named in the operator's `Input` resolutions, a mod
+/// preferred over another above it; and the `Input` pairs the operator set to `Coexist`, whose shared and exclusive
+/// leases the loader runs together. Both are bounded by the resolution book, which grows only by operator action.
 pub struct LeaseArbiter {
     leases: [CapabilityLeases; Capability::ALL.len()],
     claims: [[Option<ClaimMode>; Capability::ALL.len()]; ModMask::CAPACITY],
     coexist: [[ModMask; ModMask::CAPACITY]; Capability::ALL.len()],
     preferred: [[ModMask; ModMask::CAPACITY]; Capability::ALL.len()],
     blocked: [[Option<ModIndex>; Capability::ALL.len()]; ModMask::CAPACITY],
+    ranking: Vec<String>,
+    input_coexist: Vec<(String, String)>,
 }
 
 impl LeaseArbiter {
@@ -32,6 +40,8 @@ impl LeaseArbiter {
             coexist: [[ModMask::default(); ModMask::CAPACITY]; Capability::ALL.len()],
             preferred: [[ModMask::default(); ModMask::CAPACITY]; Capability::ALL.len()],
             blocked: [[None; Capability::ALL.len()]; ModMask::CAPACITY],
+            ranking: Vec::new(),
+            input_coexist: Vec::new(),
         }
     }
 
@@ -43,6 +53,9 @@ impl LeaseArbiter {
 
     /// Rebuilds the claim and resolution tables from the registry and the book, then the blocked table.
     pub fn refresh_blocked(&mut self, registry: &ModRegistry, book: &ResolutionBook) {
+        self.ranking = Self::rank(book);
+        self.input_coexist =
+            book.coexist_pairs(Capability::Input).map(|(a, b)| (a.to_string(), b.to_string())).collect();
         // With no stored resolution every pair takes the default, so no pair lookup (which allocates a key) is needed
         let defaults_only = book.is_empty();
         for cap in Capability::ALL {
@@ -216,6 +229,23 @@ impl LeaseArbiter {
         blocks.then_some(holder)
     }
 
+    /// The input lease ranking as of the last `refresh_blocked`, mod ids highest first: each mod an `Input`
+    /// resolution prefers is above the mod it is preferred over. Among mods with no order between them, and in a
+    /// loop of preferences, the lower id comes first.
+    pub fn ranking(&self) -> Vec<String> {
+        self.ranking.clone()
+    }
+
+    /// The ranking `ranking` gives, without a copy, so a caller can compare it each tick without allocating.
+    pub fn ranking_ids(&self) -> &[String] {
+        &self.ranking
+    }
+
+    /// The `Input` coexist pairs as of the last `refresh_blocked`, each as its two sorted mod ids.
+    pub fn coexist_ids(&self) -> &[(String, String)] {
+        &self.input_coexist
+    }
+
     /// The active holders of `cap`, the newest acquisition first.
     pub fn most_recent(&self, cap: Capability) -> impl Iterator<Item = ModIndex> + '_ {
         let state = &self.leases[Self::slot(cap)];
@@ -307,6 +337,24 @@ impl LeaseArbiter {
                 hub.push(holder, ModEvent::Resumed(cap));
             }
         }
+    }
+
+    // Orders the mods of the `Input` preferences: the lowest id that no remaining mod is preferred over goes next; in a
+    // loop, the lowest remaining id.
+    fn rank(book: &ResolutionBook) -> Vec<String> {
+        let edges: Vec<(&str, &str)> = book.preferences(Capability::Input).collect();
+        let mut remaining: BTreeSet<&str> = edges.iter().flat_map(|(above, below)| [*above, *below]).collect();
+        let mut ranking = Vec::with_capacity(remaining.len());
+        while let Some(first) = remaining.first().copied() {
+            let free = remaining
+                .iter()
+                .copied()
+                .find(|id| !edges.iter().any(|(above, below)| below == id && remaining.contains(above)));
+            let next = free.unwrap_or(first);
+            remaining.remove(next);
+            ranking.push(next.to_string());
+        }
+        ranking
     }
 
     fn slot(cap: Capability) -> usize {

@@ -2,15 +2,18 @@ use amm_core::structs::descriptor::Capability;
 
 use crate::types::{AmmCapability, AmmStatus};
 
-impl From<Capability> for AmmCapability {
-    fn from(value: Capability) -> Self {
+impl TryFrom<Capability> for AmmCapability {
+    type Error = AmmStatus;
+
+    /// `Input` is not a manager lease, so it has no ABI value: `InvalidArgument`.
+    fn try_from(value: Capability) -> Result<Self, Self::Error> {
         match value {
-            Capability::Camera => AmmCapability::Camera,
-            Capability::Input => AmmCapability::Input,
-            Capability::Hud => AmmCapability::Hud,
-            Capability::Overlay => AmmCapability::Overlay,
-            Capability::WorldDraw => AmmCapability::WorldDraw,
-            Capability::RenderSize => AmmCapability::RenderSize,
+            Capability::Camera => Ok(AmmCapability::Camera),
+            Capability::Hud => Ok(AmmCapability::Hud),
+            Capability::Overlay => Ok(AmmCapability::Overlay),
+            Capability::WorldDraw => Ok(AmmCapability::WorldDraw),
+            Capability::RenderSize => Ok(AmmCapability::RenderSize),
+            Capability::Input => Err(AmmStatus::InvalidArgument),
         }
     }
 }
@@ -19,7 +22,6 @@ impl From<AmmCapability> for Capability {
     fn from(value: AmmCapability) -> Self {
         match value {
             AmmCapability::Camera => Capability::Camera,
-            AmmCapability::Input => Capability::Input,
             AmmCapability::Hud => Capability::Hud,
             AmmCapability::Overlay => Capability::Overlay,
             AmmCapability::WorldDraw => Capability::WorldDraw,
@@ -31,10 +33,10 @@ impl From<AmmCapability> for Capability {
 impl TryFrom<u8> for AmmCapability {
     type Error = AmmStatus;
 
+    /// The unused value 1 (`Input` before 3.0) and any value above 5 are `InvalidArgument`.
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(AmmCapability::Camera),
-            1 => Ok(AmmCapability::Input),
             2 => Ok(AmmCapability::Hud),
             3 => Ok(AmmCapability::Overlay),
             4 => Ok(AmmCapability::WorldDraw),

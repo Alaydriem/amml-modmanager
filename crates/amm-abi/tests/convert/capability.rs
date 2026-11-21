@@ -2,11 +2,17 @@ use amm_abi::types::{AmmCapability, AmmStatus};
 use amm_core::structs::descriptor::Capability;
 
 #[test]
-fn capability_byte_out_of_range_is_rejected() {
-    for (byte, capability) in Capability::ALL.into_iter().enumerate() {
-        let abi = AmmCapability::try_from(byte as u8);
-        assert_eq!(abi.map(Capability::from), Ok(capability));
+fn every_manager_lease_has_a_byte_and_reads_back() {
+    for capability in Capability::MANAGER {
+        let abi = AmmCapability::try_from(capability).expect("a manager lease has an ABI value");
+        assert_eq!(AmmCapability::try_from(abi as u8).map(Capability::from), Ok(capability));
     }
-    assert_eq!(AmmCapability::try_from(Capability::ALL.len() as u8), Err(AmmStatus::InvalidArgument));
+}
+
+#[test]
+fn input_has_no_byte_and_its_old_byte_is_rejected() {
+    assert_eq!(AmmCapability::try_from(Capability::Input), Err(AmmStatus::InvalidArgument));
+    assert_eq!(AmmCapability::try_from(1), Err(AmmStatus::InvalidArgument));
+    assert_eq!(AmmCapability::try_from(6), Err(AmmStatus::InvalidArgument));
     assert_eq!(AmmCapability::try_from(255), Err(AmmStatus::InvalidArgument));
 }

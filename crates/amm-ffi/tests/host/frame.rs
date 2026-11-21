@@ -39,23 +39,20 @@ fn a_client_without_a_layer_lease_is_not_called() {
 #[test]
 fn layers_follow_snapshot_order() {
     let host = TestHost::new();
-    let claims = [("Overlay", "Shared"), ("Input", "Shared")];
-    let input_holder =
-        TestClient::register(&host, &Descriptors::with_claims("pilot", &claims, ""), TestMesh::triangle());
+    let pilot = TestClient::register(&host, &Descriptors::overlay("pilot"), TestMesh::triangle());
     let overlay = TestClient::register(&host, &Descriptors::overlay("legend"), TestMesh::triangle());
     let hud = TestClient::register(
         &host,
         &Descriptors::with_claims("corner", &[("Hud", "Shared")], ""),
         TestMesh::triangle(),
     );
-    input_holder.acquire(AmmCapability::Overlay);
-    input_holder.acquire(AmmCapability::Input);
     overlay.acquire(AmmCapability::Overlay);
+    pilot.acquire(AmmCapability::Overlay);
     hud.acquire(AmmCapability::Hud);
 
     let frame = host.frame(0);
 
-    assert_eq!(TestHost::owners(&frame), vec![hud.owner(), overlay.owner(), input_holder.owner()]);
+    assert_eq!(TestHost::owners(&frame), vec![hud.owner(), pilot.owner(), overlay.owner()]);
     assert_eq!(hud.state().allowed.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(overlay.state().allowed.load(std::sync::atomic::Ordering::SeqCst), 2);
 }

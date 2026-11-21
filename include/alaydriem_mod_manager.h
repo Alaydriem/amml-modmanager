@@ -8,65 +8,15 @@
 #include <stdbool.h>
 
 /*
- The `flags` bit of `send_move` that holds jump.
+ The ABI major version, the `MAJOR` of every manager registry table. A client and the manager must agree on it.
  */
-#define AMM_MOVE_JUMP 1
+#define AMM_ABI_MAJOR 3
 
 /*
- The `flags` bit of `send_move` that holds sneak.
+ The ABI minor version, the `MINOR` and `version` of every manager registry table. It grows when functions are added
+ at the end of a table or fields at the end of a sized struct.
  */
-#define AMM_MOVE_SNEAK (1 << 1)
-
-/*
- The `flags` bit of `send_move` that holds sprint.
- */
-#define AMM_MOVE_SPRINT (1 << 2)
-
-/*
- The most thousandths of one `send_move` axis, either way: 1000 is the full axis.
- */
-#define AMM_MOVE_AXIS_MAX 1000
-
-/*
- The `op` of `send_pointer` for the left button.
- */
-#define AMM_POINTER_OP_LEFT 1
-
-/*
- The `op` of `send_pointer` for the right button.
- */
-#define AMM_POINTER_OP_RIGHT 2
-
-/*
- The `op` of `send_pointer` for the middle button.
- */
-#define AMM_POINTER_OP_MIDDLE 3
-
-/*
- The `op` of `send_pointer` for the wheel.
- */
-#define AMM_POINTER_OP_WHEEL 4
-
-/*
- The `op` of `send_pointer` for a yaw turn.
- */
-#define AMM_POINTER_OP_TURN_YAW 5
-
-/*
- The `op` of `send_pointer` for a pitch turn.
- */
-#define AMM_POINTER_OP_TURN_PITCH 6
-
-/*
- The ABI major version. A client and the manager must agree on it.
- */
-#define AMM_ABI_MAJOR 2
-
-/*
- The ABI minor version. It grows when functions are added at the end of the table or fields at the end of a
- sized struct.
- */
-#define AMM_ABI_MINOR 4
+#define AMM_ABI_MINOR 0
 
 /*
  The result code of a table function.
@@ -89,24 +39,26 @@ enum AmmStatus
   AMM_STATUS_UNSUPPORTED,
   AMM_STATUS_MANAGER_MISSING,
   /*
-   The request cannot be taken now: try again later. `request_screenshot` and `request_screenshot_layers`
-   return it while a capture of the mod is in flight, or while every capture slot of the manager is in use.
+   The request cannot be taken now: try again later.
    */
   AMM_STATUS_BUSY,
   /*
-   Since 2.4. The game is not in the state the call needs: `send_move` returns it while the game has no local
-   player in a world, `send_key` for a key down while the manager does not yet know the game's keyboard
-   controller, and `send_pointer` for a button down or a wheel turn while it does not yet know the game's mouse
-   device.
+   The game is not in the state the call needs.
    */
   AMM_STATUS_NOT_READY,
+  /*
+   Since 3.0. The manager is disabled: its tables stay readable, but every function refuses. A mod stops using
+   the tables at their `ProviderGone`.
+   */
+  AMM_STATUS_DISABLED,
 };
 #ifndef __cplusplus
 typedef int32_t AmmStatus;
 #endif // __cplusplus
 
 /*
- A capability a mod can hold a lease on.
+ A capability a mod can hold a manager lease on. Game input is not one: a mod takes it from the loader. The value 1
+ is unused (it was `Input` before 3.0), so an old value is never read as another capability.
  */
 enum AmmCapability
 #ifdef __cplusplus
@@ -114,80 +66,13 @@ enum AmmCapability
 #endif // __cplusplus
  {
   AMM_CAPABILITY_CAMERA = 0,
-  AMM_CAPABILITY_INPUT,
-  AMM_CAPABILITY_HUD,
-  AMM_CAPABILITY_OVERLAY,
-  AMM_CAPABILITY_WORLD_DRAW,
-  AMM_CAPABILITY_RENDER_SIZE,
+  AMM_CAPABILITY_HUD = 2,
+  AMM_CAPABILITY_OVERLAY = 3,
+  AMM_CAPABILITY_WORLD_DRAW = 4,
+  AMM_CAPABILITY_RENDER_SIZE = 5,
 };
 #ifndef __cplusplus
 typedef uint8_t AmmCapability;
-#endif // __cplusplus
-
-/*
- What a screenshot shows, as the `layers` byte of `request_screenshot_layers`.
- */
-enum AmmScreenshotLayers
-#ifdef __cplusplus
-  : uint8_t
-#endif // __cplusplus
- {
-  /*
-   Taken after the game has drawn and before any mod layer, toast or the panel.
-   */
-  AMM_SCREENSHOT_LAYERS_GAME_ONLY = 0,
-  /*
-   Taken after the last mod layer and before the manager's panel and toasts: the layers of all mods show.
-   */
-  AMM_SCREENSHOT_LAYERS_WITH_MOD_LAYERS = 1,
-};
-#ifndef __cplusplus
-typedef uint8_t AmmScreenshotLayers;
-#endif // __cplusplus
-
-/*
- Why a capture stream frame has no pixels, as the `fault` byte of an `AmmCaptureStreamFrame`.
- */
-enum AmmCaptureStreamFault
-#ifdef __cplusplus
-  : uint8_t
-#endif // __cplusplus
- {
-  /*
-   The frame holds its pixels.
-   */
-  AMM_CAPTURE_STREAM_FAULT_NONE = 0,
-  /*
-   The back buffer could not be copied, read or written.
-   */
-  AMM_CAPTURE_STREAM_FAULT_COPY_FAILED = 1,
-  /*
-   The back buffer's DXGI format, in `format`, is not one the manager reads.
-   */
-  AMM_CAPTURE_STREAM_FAULT_UNSUPPORTED_FORMAT = 2,
-  /*
-   The copy was not read within 30 Presents.
-   */
-  AMM_CAPTURE_STREAM_FAULT_TIMED_OUT = 3,
-  /*
-   The device dropped its resources while the copy was in flight, with no change of the back buffer size.
-   */
-  AMM_CAPTURE_STREAM_FAULT_DEVICE_LOST = 4,
-  /*
-   The mod lost its `Hud` and `Overlay` leases before a Present took the frame.
-   */
-  AMM_CAPTURE_STREAM_FAULT_NOT_PERMITTED = 5,
-  /*
-   The back buffer changed size while the copy was in flight; frames asked for after it come at the new size.
-   */
-  AMM_CAPTURE_STREAM_FAULT_RESIZED = 6,
-  /*
-   The request named a Present that had passed when the manager saw it.
-   */
-  AMM_CAPTURE_STREAM_FAULT_MISSED = 7,
-};
-#ifndef __cplusplus
-typedef uint8_t AmmCaptureStreamFault;
 #endif // __cplusplus
 
 /*
@@ -207,7 +92,9 @@ typedef uint8_t AmmAcquireOutcome;
 #endif // __cplusplus
 
 /*
- Which event an `AmmEvent` carries. The doc of `AmmEvent` says which fields each kind uses.
+ Which event an `AmmEvent` carries. The doc of `AmmEvent` says which fields each kind uses. The values 10 to 15 are
+ unused (game input and screenshot events before 3.0, now loader events), so an old value is never read as another
+ kind.
  */
 enum AmmEventKind
 #ifdef __cplusplus
@@ -215,48 +102,27 @@ enum AmmEventKind
 #endif // __cplusplus
  {
   AMM_EVENT_KIND_ENABLED = 0,
-  AMM_EVENT_KIND_DISABLED,
-  AMM_EVENT_KIND_GRANTED,
-  AMM_EVENT_KIND_REVOKED,
-  AMM_EVENT_KIND_SUSPENDED,
-  AMM_EVENT_KIND_RESUMED,
-  AMM_EVENT_KIND_CAPABILITY_AVAILABLE,
-  AMM_EVENT_KIND_KEYBIND,
+  AMM_EVENT_KIND_DISABLED = 1,
+  AMM_EVENT_KIND_GRANTED = 2,
+  AMM_EVENT_KIND_REVOKED = 3,
+  AMM_EVENT_KIND_SUSPENDED = 4,
+  AMM_EVENT_KIND_RESUMED = 5,
+  AMM_EVENT_KIND_CAPABILITY_AVAILABLE = 6,
+  AMM_EVENT_KIND_KEYBIND = 7,
   /*
    Saved settings of the mod changed. `code` is the number of changed paths; the mod reads the whole
    document again with `config_document`.
    */
-  AMM_EVENT_KIND_SETTINGS_CHANGED,
-  AMM_EVENT_KIND_WORLD_RELOAD_APPLY,
-  AMM_EVENT_KIND_KEY,
-  AMM_EVENT_KIND_POINTER_BUTTON,
-  AMM_EVENT_KIND_POINTER_DELTA,
-  AMM_EVENT_KIND_WHEEL,
+  AMM_EVENT_KIND_SETTINGS_CHANGED = 8,
+  AMM_EVENT_KIND_WORLD_RELOAD_APPLY = 9,
   /*
-   The pixels of capture `code` (its sequence) were copied (`phase` 1) or the copy failed or was
-   cancelled (`phase` 0).
+   The person clicked the mod's menu entry whose id is in `code`.
    */
-  AMM_EVENT_KIND_SCREENSHOT_TAKEN,
+  AMM_EVENT_KIND_MENU_ENTRY_CLICKED = 16,
   /*
-   The file of capture `code` (its sequence) is in place (`phase` 1) or the encode or write failed (`phase` 0).
+   The person picked another language. Only a mod that has called `locale` gets it; the mod calls `locale` again.
    */
-  AMM_EVENT_KIND_SCREENSHOT_WRITTEN,
-  /*
-   Since 1.4. The person clicked the mod's menu entry whose id is in `code`.
-   */
-  AMM_EVENT_KIND_MENU_ENTRY_CLICKED,
-  /*
-   Since 1.5. The person picked another language. Only a mod that has called `locale` gets it; the mod calls
-   `locale` again.
-   */
-  AMM_EVENT_KIND_LOCALE_CHANGED,
-  /*
-   Since 2.1. The manager let go of the fake keys the mod held with `send_key`, or (since 2.2) the mouse buttons
-   it held with `send_pointer`, or (since 2.4) the move intent it held with `send_move`, because the panel
-   opened, the game window lost focus, the world was left or the mod was disabled; a move intent also goes when
-   the mod's `Input` lease ends or another mod sets one. The mod drops its own record of them. No field.
-   */
-  AMM_EVENT_KIND_FAKE_KEYS_RELEASED,
+  AMM_EVENT_KIND_LOCALE_CHANGED = 17,
 };
 #ifndef __cplusplus
 typedef uint8_t AmmEventKind;
@@ -314,62 +180,6 @@ typedef uint8_t AmmCursorShape;
 #endif // __cplusplus
 
 /*
- The level of one log call.
- */
-enum AmmLogLevel
-#ifdef __cplusplus
-  : uint8_t
-#endif // __cplusplus
- {
-  AMM_LOG_LEVEL_ERROR = 0,
-  AMM_LOG_LEVEL_WARN,
-  AMM_LOG_LEVEL_INFO,
-  AMM_LOG_LEVEL_DEBUG,
-  AMM_LOG_LEVEL_TRACE,
-};
-#ifndef __cplusplus
-typedef uint8_t AmmLogLevel;
-#endif // __cplusplus
-
-/*
- One frame asked of the capture stream, the argument of `capture_stream_request`. The manager does not read
- `tag`; it comes back with the frame. `size` is `size_of` the struct the mod was built with. `present_seq` 0 asks
- for the next Present; any other number is the one Present the frame is taken from, as counted by the
- `present_count` slot, and the frame fails `Missed` when that Present passed first.
- */
-typedef struct AmmCaptureStreamRequest {
-  uint32_t size;
-  uint64_t tag;
-  uint64_t present_seq;
-} AmmCaptureStreamRequest;
-
-/*
- One frame of the capture stream, written by `capture_stream_take`. The mod sets `size` to `size_of` its struct;
- the manager writes only that many bytes and sets `size` to the bytes it wrote. With `fault` `AmmCaptureStreamFault::None`,
- `pixels` holds `pixels_len` bytes: `height` rows of `row_pitch` bytes, of which the first `width * 4` are the
- row's pixels in the DXGI format `format`, as the game drew them before any mod layer. The manager lends the
- pixels until the next `capture_stream_take` that returns a frame, `capture_stream_close`, or until the mod
- unregisters. With any other
- `fault` the frame failed: `pixels` is null, `pixels_len` 0, and `format` is the back buffer's format for
- `UnsupportedFormat`, else 0. `present_seq` (after `pixels_len`) is the number of the Present that filled the frame, counted by the overlay from 1; 0 when the manager
- does not count. `lend_id` (after `present_seq`) is 0 for a frame from `capture_stream_take`; a frame from
- `capture_stream_lend` names its lease there, and its pixels stay valid until `capture_stream_give_back` with it.
- */
-typedef struct AmmCaptureStreamFrame {
-  uint32_t size;
-  uint64_t tag;
-  uint32_t width;
-  uint32_t height;
-  uint32_t row_pitch;
-  uint32_t format;
-  uint8_t fault;
-  const uint8_t *pixels;
-  uintptr_t pixels_len;
-  uint64_t present_seq;
-  uint64_t lend_id;
-} AmmCaptureStreamFrame;
-
-/*
  The answer to `acquire`. `holder` is the mod index of the current holder when `outcome` is `Denied`.
  `0xFF` means no holder.
  */
@@ -390,15 +200,6 @@ typedef struct AmmAcquireResult {
  - `Keybind`: `code` is the index into the descriptor keybind list, `phase` is 0 pressed, 1 released, 2 repeat.
  - `SettingsChanged`: `code` is the number of changed paths. The event does not name them: the mod reads the
    whole document again with `config_document`.
- - `Key`: `code` is the virtual key, `phase` bit 0 is down and bit 1 is repeat.
- - `PointerButton`: `code` is the button, `phase` is 1 when down, `x` and `y` are the position.
- - `PointerDelta`: `x` and `y` are the deltas.
- - `Wheel`: `x` is the line delta.
- - `ScreenshotTaken`: `code` is the capture sequence that `request_screenshot` or `request_screenshot_layers`
-   returned, `phase` is 1 when the pixels were copied and 0 when the copy failed or was cancelled. A capture with
-   `phase` 0 ends here.
- - `ScreenshotWritten`: `code` is the capture sequence, `phase` is 1 when the PNG file is in place and 0 when
-   the encode or the write failed, which leaves no file.
  - `MenuEntryClicked`: `code` is the id `register_menu_entry` gave the entry.
  - `LocaleChanged`: no field; the mod reads the code again with `locale`.
  */
@@ -564,6 +365,124 @@ typedef struct AmmHandle {
 } AmmHandle;
 
 /*
+ The registry table `alaydriem.modmanager.core`: registration, events, the language, the panel state, menu
+ entries and the mod icon. New functions are only added at the end, with a higher minor. A null slot means the
+ function is absent. All text is UTF-8 as a pointer and a length. Game thread unless a function says otherwise.
+ After the manager is disabled every function answers `Disabled`, or 0 / nothing for one that gives no status.
+ */
+typedef struct AmmCoreTable {
+  uint32_t size;
+  uint32_t version;
+  /*
+   Registers a mod from its descriptor HCL text. `config_dir` is the mod's own AMML config folder as an absolute
+   UTF-8 path with no `..` part, inside the AMML mods folder that holds the manager; its `config.hcl` (the
+   descriptor's `config_path`) is read and written there. Any other folder, the manager's own config folder and
+   the folder of another live mod are `InvalidArgument`. Both texts are valid only for the call. `out_handle`
+   is written on success. Frame and `textures_lost` callbacks are given later with the layers table.
+   */
+  AmmStatus (*register_)(const uint8_t *descriptor,
+                         uintptr_t descriptor_len,
+                         const uint8_t *config_dir,
+                         uintptr_t config_dir_len,
+                         struct AmmHandle *out_handle);
+  /*
+   Releases everything the mod holds. It does not return while a `frame` or `textures_lost` callback of this
+   mod runs on the render thread. On `Ok` no callback of this mod starts after it returns. Any other status
+   means the registration may still be live (for example `NotPermitted` from inside one of this mod's
+   callbacks). A handle that names no live registration is `UnknownHandle`.
+   */
+  AmmStatus (*unregister)(struct AmmHandle handle);
+  /*
+   Drains the mod event queue into `out_buf`, a buffer the caller owns with room for `capacity` events, and
+   returns the number written. The manager keeps no pointer to the buffer after the call.
+   */
+  uintptr_t (*poll_events)(struct AmmHandle handle, struct AmmEvent *out_buf, uintptr_t capacity);
+  /*
+   The language code the person picked in the manager: empty for English, `en_XA` for the pseudo-locale, or a
+   locale such as `ru` or `pt_BR`, copied into `out_buf` (room for `out_cap` bytes); returns its length. A
+   return value greater than `out_cap` means the buffer was too small and nothing was written. `out_buf` may be
+   null when `out_cap` is 0. A handle that names no live registration gives 0. Only a mod that has called it
+   gets `LocaleChanged`.
+   */
+  uint32_t (*locale)(struct AmmHandle handle, uint8_t *out_buf, uintptr_t out_cap);
+  /*
+   Any thread. 1 while the manager panel is open, else 0.
+   */
+  uint8_t (*panel_open)(void);
+  /*
+   Places a button for the mod in the corner row of the start and pause screens: a tile with `mark` (1 to 3
+   characters) and `label` (1 to 24 characters). `screens` is a bit set: 1 the start screen, 2 the pause screen;
+   other bits are dropped, and no screen bit is `InvalidArgument`, as is a label or mark of the wrong length.
+   On `Ok`, `out_id` gets the entry id, counted from 1 within the mod; a click sends the mod `MenuEntryClicked`
+   with that id in `code`. A mod holds at most 4 entries and the manager 8, past either `QueueFull`. A null text
+   or `out_id` is `NullPointer`. Both texts are valid only for the call.
+   */
+  AmmStatus (*register_menu_entry)(struct AmmHandle handle,
+                                   const uint8_t *label,
+                                   uintptr_t label_len,
+                                   const uint8_t *mark,
+                                   uintptr_t mark_len,
+                                   uint8_t screens,
+                                   uint16_t *out_id);
+  /*
+   Sets the mod's icon in the manager panel from PNG file bytes: at most 262144 bytes, its first frame used,
+   each side 1 to 256 pixels. A zero `png_len` clears the icon, and `png` may then be null. A null `png` with a
+   `png_len` above 0 is `NullPointer`; bad bytes are `InvalidArgument` and the icon stays. `png` is valid only
+   for the call.
+   */
+  AmmStatus (*set_icon)(struct AmmHandle handle, const uint8_t *png, uintptr_t png_len);
+} AmmCoreTable;
+
+/*
+ The registry table `alaydriem.modmanager.settings`: the mod's saved settings. Game thread. New functions are only
+ added at the end, with a higher minor. A null slot means the function is absent. After the manager is disabled
+ every function answers `Disabled`.
+ */
+typedef struct AmmSettingsTable {
+  uint32_t size;
+  uint32_t version;
+  /*
+   The checked `config.hcl` text of the mod. The text at `out_ptr` is owned by the manager and is valid until
+   the next `config_document` call for this handle or a `SettingsChanged` event.
+   */
+  AmmStatus (*config_document)(struct AmmHandle handle, const uint8_t **out_ptr, uintptr_t *out_len);
+  /*
+   A mod changes one of its own saved values with one HCL expression. `path` and `value_hcl` are valid only for
+   the call. The mod that made the change gets no `SettingsChanged`.
+   */
+  AmmStatus (*set_setting)(struct AmmHandle handle,
+                           const uint8_t *path,
+                           uintptr_t path_len,
+                           const uint8_t *value_hcl,
+                           uintptr_t value_len);
+} AmmSettingsTable;
+
+/*
+ The registry table `alaydriem.modmanager.keybinds`: the key binds of the mod's descriptor as the person set them.
+ Game thread. Presses come as `Keybind` events from `poll_events`. New functions are only added at the end, with a
+ higher minor. A null slot means the function is absent. After the manager is disabled every function answers 0.
+ */
+typedef struct AmmKeybindsTable {
+  uint32_t size;
+  uint32_t version;
+  /*
+   The person's chord of descriptor key bind `index` as text (for example `Ctrl+Shift+F10`), copied into
+   `out_buf` (room for `out_cap` bytes); returns its length. A return value greater than `out_cap` means the
+   buffer was too small and nothing was written. `out_buf` may be null when `out_cap` is 0. An index past the
+   descriptor's list or a handle that names no live registration gives 0.
+   */
+  uint32_t (*chord_text)(struct AmmHandle handle,
+                         uint32_t index,
+                         uint8_t *out_buf,
+                         uintptr_t out_cap);
+  /*
+   1 while descriptor key bind `index` of the mod is held down (between its `Pressed` and `Released` events),
+   else 0. An index past the descriptor's list or a handle that names no live registration gives 0.
+   */
+  uint8_t (*bind_down)(struct AmmHandle handle, uint32_t index);
+} AmmKeybindsTable;
+
+/*
  A back-buffer size in physical pixels. 0 x 0 stands for no size where a field says so.
  */
 typedef struct AmmRenderSize {
@@ -585,370 +504,92 @@ typedef struct AmmRenderSizeState {
 } AmmRenderSizeState;
 
 /*
- The function table returned by `amm_get_api`. New functions are only added at the end, with a higher `abi_minor`.
- A client checks `size` before it calls a function added after its own minor version. The functions from
- `register` to `capture_stream_give_back` are part of 2.0; a function after it came in the later minor version
- its doc names (`watch_keys` and `send_key` are 2.1, `send_pointer` and `panel_open` are 2.2, `send_move` is 2.4).
- Minor 2.3 adds no function: it adds the look-turn ops 5 and 6 to `send_pointer`.
- A null slot means the function is absent.
-
- All text is UTF-8 as a pointer and a length.
+ The registry table `alaydriem.modmanager.layers`: the mod's egui layers, its texture budget, the cursor mode, the
+ game picture and the render size. Game thread unless a function says otherwise. New functions are only added at
+ the end, with a higher minor. A null slot means the function is absent. After the manager is disabled every
+ function answers `Disabled`, or nothing for `set_cursor_mode`.
  */
-typedef struct AmmApi {
+typedef struct AmmLayersTable {
   uint32_t size;
-  uint32_t abi_major;
-  uint32_t abi_minor;
+  uint32_t version;
   /*
-   Game thread, at mod load. Registers a mod from its descriptor HCL text.
-   `config_dir` is the mod's own AMML config folder as an absolute UTF-8 path with no `..` part; its
-   `config.hcl` (the descriptor's `config_path`) is read and written there. Any other folder is
-   `InvalidArgument`. `descriptor_hcl` and `config_dir` are valid only for the call. `callbacks` is copied
-   during the call, up to the `size` it declares; a `size` below the 2.0 `AmmCallbacks` is `InvalidArgument`.
-   `out_handle` is written on success.
+   Sets the mod's frame and `textures_lost` callbacks, which run on the render thread, replacing the ones it
+   gave before. `callbacks` is copied during the call, up to the `size` it declares; a `size` below the 3.0
+   `AmmCallbacks` is `InvalidArgument`, a null `callbacks` is `NullPointer`. A call from inside one of the mod's
+   callbacks is `NotPermitted`.
    */
-  AmmStatus (*register_)(const uint8_t *descriptor_hcl,
-                         uintptr_t descriptor_len,
-                         const uint8_t *config_dir,
-                         uintptr_t config_dir_len,
-                         const struct AmmCallbacks *callbacks,
-                         struct AmmHandle *out_handle);
+  AmmStatus (*set_callbacks)(struct AmmHandle handle, const struct AmmCallbacks *callbacks);
   /*
-   Game thread, at mod unload. Releases everything the mod holds. It does not return while a `frame` or
-   `textures_lost` callback of this mod runs on the render thread. On `Ok` no callback of this mod starts
-   after it returns, so the mod may free its callback state at once. Any other status means the
-   registration may still be live (for example `NotPermitted` when it is called from inside one of this
-   mod's callbacks), so the mod must keep its callback state alive. A handle that names no live
-   registration is `UnknownHandle`.
-   */
-  AmmStatus (*unregister)(struct AmmHandle handle);
-  /*
-   Game thread. The checked `config.hcl` text of the mod. The text at `out_ptr` is owned by the manager and
-   is valid until the next `config_document` call for this handle or a `SettingsChanged` event.
-   */
-  AmmStatus (*config_document)(struct AmmHandle handle, const uint8_t **out_ptr, uintptr_t *out_len);
-  /*
-   Game thread. Asks for a capability lease. `capability` is an `AmmCapability` value; any other value is
-   answered as denied with no holder.
-   */
-  struct AmmAcquireResult (*acquire)(struct AmmHandle handle, uint8_t capability);
-  /*
-   Game thread. Gives a lease back. `capability` is an `AmmCapability` value; any other value is ignored.
-   */
-  void (*release)(struct AmmHandle handle, uint8_t capability);
-  /*
-   Any thread. The id of the mod that holds the lease now, copied as UTF-8 into `out_buf`, a buffer the
-   caller owns with room for `out_cap` bytes. Returns the length of the id; 0 means no mod holds it, or
-   `capability` is not an `AmmCapability` value. A return value greater than `out_cap` means the buffer was
-   too small: nothing was written, and the caller may call again with a buffer of that length. `out_buf`
-   may be null when `out_cap` is 0. The manager keeps no pointer to the buffer after the call.
-   */
-  uint32_t (*holder)(uint8_t capability, uint8_t *out_buf, uintptr_t out_cap);
-  /*
-   Game thread. Drains the mod event queue into `out_buf`, a buffer the caller owns with room for `capacity`
-   events, and returns the number written. The manager keeps no pointer to the buffer after the call.
-   */
-  uintptr_t (*poll_events)(struct AmmHandle handle, struct AmmEvent *out_buf, uintptr_t capacity);
-  /*
-   Game thread. Key state, answered only for the `Input` holder.
-   */
-  bool (*key_down)(struct AmmHandle handle, uint32_t vk);
-  /*
-   Game thread. A mod changes one of its own saved values with one HCL expression.
-   `path` and `value_hcl` are valid only for the call.
-   */
-  AmmStatus (*set_setting)(struct AmmHandle handle,
-                           const uint8_t *path,
-                           uintptr_t path_len,
-                           const uint8_t *value_hcl,
-                           uintptr_t value_len);
-  /*
-   Game thread. Turns the cursor mode on (1) or off (0). Any other value is ignored.
-   */
-  void (*set_cursor_mode)(struct AmmHandle handle, uint8_t on);
-  /*
-   Any thread. One Curia log event from the mod. Never blocks. `level` is an `AmmLogLevel` value; any other
-   value drops the event. `target`, `message`, `fields_json` and `file`
-   are valid only for the call; the manager copies what it keeps.
-   */
-  void (*log)(struct AmmHandle handle,
-              uint8_t level,
-              const uint8_t *target,
-              uintptr_t target_len,
-              const uint8_t *message,
-              uintptr_t message_len,
-              const uint8_t *fields_json,
-              uintptr_t fields_len,
-              const uint8_t *file,
-              uintptr_t file_len,
-              uint32_t line);
-  /*
-   Game thread. Asks for a game-only screenshot of the next Present, taken after the game has drawn
-   and before any mod layer, toast or the panel, written as an opaque 8-bit RGB PNG to `path`. `path` is an
-   absolute UTF-8 file path ending in `.png` (any case) with no `..` part, not a network, device or verbatim
-   path, whose parent folder exists; any other path is `InvalidArgument`. The file is written atomically and
-   replaces an existing file. The mod must hold an active `Hud` or `Overlay` lease, else `NotPermitted`. One
-   capture of a mod is in flight at a time, from the request to its `ScreenshotWritten` event, and the
-   manager has a fixed number of capture slots: past either, `Busy`. On `Ok`, `out_sequence` gets the capture
-   sequence, never 0, that the `ScreenshotTaken` and `ScreenshotWritten` events carry in `code`. A null
-   `path` or `out_sequence` is `NullPointer`, checked before the path; a path longer than 4096 bytes is
-   `InvalidArgument`. `path` is valid only for the call. `request_screenshot_layers` with `layers` 0 does the
-   same.
-   */
-  AmmStatus (*request_screenshot)(struct AmmHandle handle,
-                                  const uint8_t *path,
-                                  uintptr_t path_len,
-                                  uint32_t *out_sequence);
-  /*
-   Game thread. 1 when a mod other than the caller holds `capability` now, else 0. A bad handle or
-   a value that is not an `AmmCapability` gives 0. Called from a frame callback (render thread) it gives 0,
-   because the host is busy composing the frame.
-   */
-  uint8_t (*held_by_other)(struct AmmHandle handle, uint8_t capability);
-  /*
-   Game thread. The texture budget the manager gave the mod: at most `out_bytes` bytes of textures
-   in at most `out_count` textures. Both out pointers are written on `Ok`; a null out pointer is
-   `NullPointer`, and nothing is written.
+   The texture budget the manager gave the mod: at most `out_bytes` bytes of textures in at most `out_count`
+   textures. Both are written on `Ok`; a null out pointer is `NullPointer`, and nothing is written.
    */
   AmmStatus (*texture_budget)(struct AmmHandle handle, uint64_t *out_bytes, uint32_t *out_count);
   /*
-   Game thread. `request_screenshot` with a choice of capture point. `layers` is an
-   `AmmScreenshotLayers` value: 0 (`GameOnly`) is taken after the game has drawn and before any mod layer, as
-   `request_screenshot` is; 1 (`WithModLayers`) is taken after the last mod layer and before the manager's
-   panel and toasts, so the picture shows the layers of all mods, as the player sees them, not only the
-   caller's. Any other value is `InvalidArgument`, checked after the null pointers. The path, the lease (an
-   active `Hud` or `Overlay` lease of the caller, for either value), one capture of a mod in flight at a time,
-   the manager's capture slots, which both values share, the statuses and the `ScreenshotTaken` and
-   `ScreenshotWritten` events are as for `request_screenshot`. `path` is valid only for the call.
+   Turns the cursor mode on (1) or off (0). Any other value is ignored. Turning it on needs an active `Overlay`
+   lease.
    */
-  AmmStatus (*request_screenshot_layers)(struct AmmHandle handle,
-                                         const uint8_t *path,
-                                         uintptr_t path_len,
-                                         uint8_t layers,
-                                         uint32_t *out_sequence);
+  void (*set_cursor_mode)(struct AmmHandle handle, uint8_t on);
   /*
-   Game thread. Places a button for the mod in the corner row of the start and pause screens, left
-   of the Mods button: a tile with `mark` (1 to 3 characters) and `label` (1 to 24 characters). `screens` is a
-   bit set: 1 the start screen, 2 the pause screen; other bits are dropped, and no screen bit is
-   `InvalidArgument`, as is a label or mark of the wrong length. On `Ok`, `out_id` gets the entry id, counted
-   from 1 within the mod; a click on the entry sends the mod `MenuEntryClicked` with that id in `code`. A mod
-   holds at most 4 entries and the manager 8, past either `QueueFull`. The entries go when the mod
-   unregisters. A null text or `out_id` is `NullPointer`. `label` and `mark` are valid only for the call.
-   */
-  AmmStatus (*register_menu_entry)(struct AmmHandle handle,
-                                   const uint8_t *label,
-                                   uintptr_t label_len,
-                                   const uint8_t *mark,
-                                   uintptr_t mark_len,
-                                   uint8_t screens,
-                                   uint16_t *out_id);
-  /*
-   Game thread. The language code the person picked in the manager, as UTF-8: empty for English,
-   `en_XA` for the pseudo-locale, or a locale such as `ru` or `pt_BR`. It is copied into `out_buf`, a buffer
-   the caller owns with room for `out_cap` bytes, and the call returns its length. A return value greater than
-   `out_cap` means the buffer was too small: nothing was written, and the caller may call again with a buffer
-   of that length. `out_buf` may be null when `out_cap` is 0. A handle that names no live registration gives
-   0. The first call marks the mod as a reader: only a reader gets `LocaleChanged`, so a mod built for 1.4 or
-   older never sees that event kind. The manager keeps no pointer to the buffer after the call.
-   */
-  uint32_t (*locale)(struct AmmHandle handle, uint8_t *out_buf, uintptr_t out_cap);
-  /*
-   Game thread. Sets the mod's icon, shown in the manager panel, from the PNG file bytes at `png`.
-   The file is at most 262144 bytes; its first frame is used, and its width and height are each 1 to 256
-   pixels. A zero `png_len` clears the icon, and `png` may then be null. A null `png` with a `png_len` above 0
-   is `NullPointer`. A file that is too large, is not a PNG, is outside the size range or is corrupt is
-   `InvalidArgument`, and the icon the mod had stays. A handle that names no live registration is
-   `UnknownHandle`. The bytes are checked before the handle, so bad bytes on an unknown handle are
-   `InvalidArgument`. `png` is valid only for the call; the manager keeps a decoded copy. It may be called at any time after
-   `register`. A new call replaces the current icon, and a `png_len` of 0 clears it, so the letter tile shows
-   again. A decoder panic returns `Panic` and leaves the current icon as it was. The icon goes away when the
-   mod unregisters.
-   */
-  AmmStatus (*set_icon)(struct AmmHandle handle, const uint8_t *png, uintptr_t png_len);
-  /*
-   Game thread. Whether the mod may draw the live game picture, and its size. `Ok` while the mod
-   holds `Overlay`, with the back buffer size of the last Present in physical pixels written to `out_width`
-   and `out_height` (both 0 before the first Present). `NotPermitted` while it does not hold `Overlay`, and
-   nothing is written. A null out pointer is `NullPointer`; a handle that names no live registration is
-   `UnknownHandle`; a call from inside a frame callback is `Busy`. The mod draws the picture as the egui user
-   texture `GamePicture::USER_ID` and uploads nothing; the manager drops the draw from a layer of a mod that
-   does not hold `Overlay`.
+   Whether the mod may draw the live game picture, and its size: `Ok` while the mod holds `Overlay`, with the
+   back buffer size of the last Present in physical pixels (both 0 before the first Present). `NotPermitted`
+   while it does not hold `Overlay`, and nothing is written. A null out pointer is `NullPointer`; a call from
+   inside a frame callback is `NotPermitted` (the host is busy composing the frame).
    */
   AmmStatus (*game_picture)(struct AmmHandle handle, uint32_t *out_width, uint32_t *out_height);
   /*
-   Game thread. Sets where the mod draws the game picture, `[min_x, min_y, max_x, max_y]` in
-   back-buffer pixels, or clears it with a null `rect`. While the mod holds `Overlay`, a pointer inside it
-   reaches the game at the matching place of the full window: its button is not kept from the game, and the
-   game's own mouse position is moved there, so a game screen shown in the picture can be used. A new call
-   replaces the rect. A rect with a NaN or no area is `InvalidArgument`; a handle that names no live
-   registration is `UnknownHandle`; a call from inside a frame callback is `Busy`. The manager reads `rect`
-   only during the call. The rect goes away when the mod unregisters.
+   Sets where the mod draws the game picture, `[min_x, min_y, max_x, max_y]` in back-buffer pixels, or clears it
+   with a null `rect`. While the mod holds `Overlay`, a pointer inside it reaches the game at the matching place
+   of the full window. A rect with a NaN or no area is `InvalidArgument`. The manager reads `rect` only during
+   the call.
    */
   AmmStatus (*set_game_viewport)(struct AmmHandle handle, const float (*rect)[4]);
   /*
-   Game thread. Makes the game draw at `size`, in physical pixels, whatever the size of its window,
-   or ends the size the mod forces with a null `size`. The picture is stretched into the window; the field of
-   view does not change. The mod must hold `RenderSize`, else `NotPermitted`. Each side is 1 to 16384, else
-   `InvalidArgument`. A handle that names no live registration is `UnknownHandle`; a call from inside a frame
-   callback is `NotPermitted`. The game resizes within a few Presents: `render_size` reports when the back buffer has
-   the size. The size ends, and the game gets its window size back, on a null `size`, when the mod no longer
-   holds `RenderSize` (a release, a disable or an unregister), and when the manager shuts down. While the
-   window is minimised the size change waits until the window has a size again. A resize of the window while
-   a size is forced keeps the forced size. The manager reads `size` only during the call.
+   Makes the game draw at `size`, in physical pixels, whatever the size of its window, or ends the size the mod
+   forces with a null `size`. The mod must hold `RenderSize`, else `NotPermitted`. Each side is 1 to 16384, else
+   `InvalidArgument`. The size ends on a null `size`, when the mod no longer holds `RenderSize` and when the
+   manager stops. The manager reads `size` only during the call.
    */
   AmmStatus (*set_render_size)(struct AmmHandle handle, const struct AmmRenderSize *size);
   /*
-   Game thread. Writes to `out_state` the size the mod forces (0 x 0 for none) and the back buffer
-   size and DXGI format of the last Present. `NotPermitted` while the mod does not hold `RenderSize`, and
-   nothing is written. A null `out_state` is `NullPointer`; a handle that names no live registration is
-   `UnknownHandle`; a call from inside a frame callback is `NotPermitted`. The mod sets `out_state.size` to the
-   size of its struct; the manager writes only that many bytes and sets `size` to the bytes it wrote. A `size`
-   below the 2.0 struct is `InvalidArgument`, and nothing is written.
+   Writes to `out_state` the size the mod forces (0 x 0 for none) and the back buffer size and DXGI format of the
+   last Present. `NotPermitted` while the mod does not hold `RenderSize`, and nothing is written. A null
+   `out_state` is `NullPointer`. The mod sets `out_state.size` to the size of its struct; the manager writes only
+   that many bytes and sets `size` to the bytes it wrote. A `size` below the 3.0 struct is `InvalidArgument`.
    */
   AmmStatus (*render_size)(struct AmmHandle handle, struct AmmRenderSizeState *out_state);
+} AmmLayersTable;
+
+/*
+ The registry table `alaydriem.modmanager.leases`: the manager's capability leases, `Camera`, `Hud`, `Overlay`,
+ `WorldDraw` and `RenderSize` (`AmmCapability`). Game input is not a manager lease: a mod takes it from the loader.
+ Game thread unless a function says otherwise. New functions are only added at the end, with a higher minor. A null
+ slot means the function is absent. After the manager is disabled `acquire` is denied with no holder and the others
+ answer 0 or nothing.
+ */
+typedef struct AmmLeasesTable {
+  uint32_t size;
+  uint32_t version;
   /*
-   Game thread. Asks the capture stream for one frame, tagged with `request.tag`: the next Present
-   copies the back buffer after the game has drawn and before any mod layer, toast or the panel, and
-   `capture_stream_take` gives the frames back in request order. The stream has 4 slots, shared by the frames
-   asked for, in flight and not taken yet, apart from the screenshot slots. `Busy` when every slot is in use,
-   or while the stream holds a frame of another mod: take a frame, then ask again. The mod must hold an active
-   `Hud` or `Overlay` lease, else `NotPermitted`. A handle that names no live registration is `UnknownHandle`;
-   a call from inside a frame callback is `NotPermitted`. `request.size` is the size of the mod's struct; the
-   manager reads only that many bytes. A null `request` is `NullPointer`; a `size` below the 2.0 struct is
-   `InvalidArgument`. A `request.present_seq` of 0 takes the frame from the next Present; any other number takes
-   it from that Present only (see `present_count`): the frame stays pending until that Present, and fails
-   `Missed` when that Present passed before the manager saw the request.
+   Asks for a capability lease. `capability` is an `AmmCapability` value; any other value, such as the
+   unused 1, is answered as denied with no holder.
    */
-  AmmStatus (*capture_stream_request)(struct AmmHandle handle,
-                                      const struct AmmCaptureStreamRequest *request);
+  struct AmmAcquireResult (*acquire)(struct AmmHandle handle, uint8_t capability);
   /*
-   Game thread. Writes the mod's oldest stream frame to `out_frame` once it is done, and frees its
-   slot: a frame with its pixels (lent until the next `capture_stream_take` that returns a frame, `capture_stream_close`, or
-   until the mod unregisters), or a failed frame with its fault. A frame in flight when the back buffer changes
-   size fails `Resized`; the frames asked for after the change come at the new size. `Busy`, with nothing written, while the oldest frame is
-   still in flight or the mod has no frame. A null `out_frame` is `NullPointer`; a handle that names no live
-   registration is `UnknownHandle`; a call from inside a frame callback is `NotPermitted`. The mod sets
-   `out_frame.size` to the size of its struct; the manager writes only that many bytes and sets `size` to the
-   bytes it wrote. A `size` below the 2.0 struct is `InvalidArgument`, checked before the frame is taken, so the
-   frame stays in the stream.
+   Gives a lease back. `capability` is an `AmmCapability` value; any other value is ignored.
    */
-  AmmStatus (*capture_stream_take)(struct AmmHandle handle, struct AmmCaptureStreamFrame *out_frame);
+  void (*release)(struct AmmHandle handle, uint8_t capability);
   /*
-   Game thread. Writes to `out_free` how many frames the mod may ask the capture stream for now: the
-   free slots, or 0 while the stream holds a frame of another mod. A null `out_free` is `NullPointer`; a handle
-   that names no live registration is `UnknownHandle`; a call from inside a frame callback is `NotPermitted`.
+   Any thread. The id of the mod that holds the lease now, copied as UTF-8 into `out_buf` (room for `out_cap`
+   bytes); returns its length. 0 means no mod holds it, or `capability` is not an `AmmCapability` value. A return
+   value greater than `out_cap` means the buffer was too small and nothing was written. `out_buf` may be null
+   when `out_cap` is 0.
    */
-  AmmStatus (*capture_stream_free)(struct AmmHandle handle, uint32_t *out_free);
+  uint32_t (*holder)(uint8_t capability, uint8_t *out_buf, uintptr_t out_cap);
   /*
-   Game thread. Ends the mod's capture stream: its frames are dropped, those in flight with them, and
-   the lent pixels go. Once no frame is in the stream the manager frees every stream buffer, and the overlay drops
-   its stream staging textures at the next Present. A later `capture_stream_request` starts a new stream.
-   Unregister does the same. A handle that names no live registration is `UnknownHandle`; a call from inside a
-   frame callback is `NotPermitted`.
+   1 when a mod other than the caller holds `capability` now, else 0. A bad handle or a value that is not an
+   `AmmCapability` gives 0, as does a call from a frame callback (the host is busy composing the frame).
    */
-  AmmStatus (*capture_stream_close)(struct AmmHandle handle);
-  /*
-   Game thread. Writes to `out_count` the overlay's Present count: the number of the newest Present the
-   overlay started, 0 before the first. A `capture_stream_request` with `present_seq` set to a number above
-   this count takes its frame from that Present. A null `out_count` is `NullPointer`; a handle that names no
-   live registration is `UnknownHandle`.
-   */
-  AmmStatus (*present_count)(struct AmmHandle handle, uint64_t *out_count);
-  /*
-   Game thread. As `capture_stream_take`, but the manager lends the frame's pixel buffer to the mod until
-   `capture_stream_give_back` with the `lend_id` the frame carries, however many takes and lends come between,
-   and the mod may read the pixels from any thread; the manager never writes a lent buffer. At most 8 buffers
-   are lent at once: a lend with 8 out is `Busy`, with nothing written and the frame still in the stream, as is
-   a lend while the oldest frame is in flight or the mod has none. A failed frame carries its fault and no
-   lease. `capture_stream_close` keeps the lent buffers until they are given back; unregister frees them.
-   Errors, and the `out_frame.size` rules, as `capture_stream_take`.
-   */
-  AmmStatus (*capture_stream_lend)(struct AmmHandle handle, struct AmmCaptureStreamFrame *out_frame);
-  /*
-   Game thread. Ends the lend `lend_id` of this mod: the manager reuses the buffer for a later frame, and the
-   mod must not read its pixels after the call. A `lend_id` the mod does not hold (unknown, already given back,
-   or from another mod) is `InvalidArgument`; a give-back after `capture_stream_close` is `Ok`. A handle that
-   names no live registration is `UnknownHandle`.
-   */
-  AmmStatus (*capture_stream_give_back)(struct AmmHandle handle, uint64_t lend_id);
-  /*
-   Since 2.1. Game thread. Sets the keys the mod wants to see, whatever else the key does, replacing the list of
-   an earlier call; a `count` of 0 clears it, and `vks` may then be null. `vks` holds `count` Windows
-   virtual-key codes, each 0 to 255, and at most 32 keys; a key above 255 or a longer list is `InvalidArgument`,
-   and the list the mod had stays. The mod needs an `Input` claim in its descriptor, else `NotPermitted`. A null
-   `vks` with a `count` above 0 is `NullPointer`, checked before the claim; a handle that names no live
-   registration is `UnknownHandle`. `vks` is valid only for the call. The list goes when the mod unregisters or
-   is disabled.
-   */
-  AmmStatus (*watch_keys)(struct AmmHandle handle, const uint32_t *vks, uintptr_t count);
-  /*
-   Since 2.1. Game thread. Holds a key of the game down (`down` 1) or lets it go (`down` 0) with a fake press
-   that the game sees as its own keyboard. Any other `down` value is `InvalidArgument`, as is a `vk` above 255.
-   The mod needs an `Input` claim in its descriptor, else `NotPermitted`; so is any call while the manager panel
-   is open, and a `down` of 1 while another mod holds an active `Input` lease. A `down` of 1 for a key the mod
-   already holds, or a `down` of 0 for a key it does not hold, is `Ok` and sends nothing. Since 2.4, a `down` of 1
-   is `NotReady` while the manager does not yet know the game's keyboard controller, and `Busy` while the queue
-   of presses not yet fed to the game is full; nothing is queued then. A `down` of 0 is never refused for
-   these. The manager lets go of
-   the keys a mod holds when it unregisters or is disabled, when the panel opens, when the game window loses
-   focus and when the world is left; the mod, if still registered, then gets `FakeKeysReleased`. A handle that
-   names no live registration is `UnknownHandle`.
-   */
-  AmmStatus (*send_key)(struct AmmHandle handle, uint32_t vk, uint8_t down);
-  /*
-   Since 2.2. Game thread. Sends a fake mouse action that the game sees as its own mouse. `op` 1
-   (`AMM_POINTER_OP_LEFT`) is the left button, 2 (`AMM_POINTER_OP_RIGHT`) the right button and 3
-   (`AMM_POINTER_OP_MIDDLE`) the middle button, each with `value` 1 to hold it down and 0 to let it go; `op` 4
-   (`AMM_POINTER_OP_WHEEL`) is the wheel, with `value` the signed number of notches to turn (positive away from the player), at
-   most 32 either way. Since 2.3, `op` 5 (`AMM_POINTER_OP_TURN_YAW`) and 6 (`AMM_POINTER_OP_TURN_PITCH`) turn the
-   player's look by `value` millidegrees on that axis, at most 360000 either way: the manager adds the turns of
-   one axis into one pending value and, once per client update (a frame), makes one call of the game's own turn
-   with the sum in degrees, held to 360000 either way, past its own block of the player's mouse turn, when the game has a local player. The sign of each
-   axis is the game's own. Any other `op`, a button `value`
-   other than 0 or 1, a wheel `value` past 32 either way or a turn `value` past 360000 either way is
-   `InvalidArgument`; a wheel or turn `value` of 0 is `Ok` and sends nothing. A manager of minor 2.2 or older
-   answers `InvalidArgument` to the turn ops. The rules of `send_key` apply: the
-   mod needs an `Input` claim in its descriptor, else `NotPermitted`; so is any call while the manager panel is
-   open, and a button down, a wheel turn or a look turn while another mod holds an active `Input` lease. A down for a button
-   the mod already holds, or an up for one it does not hold, is `Ok` and sends nothing. The manager lets go of
-   the buttons a mod holds on the same events as its fake keys, and the mod, if still registered, then gets
-   `FakeKeysReleased`. The manager queues at most 256 actions between game ticks: a full queue drops its oldest
-   wheel turn, never a button change, and with no wheel turn to drop the call is `QueueFull` and changes
-   nothing; a look turn uses no queue room. A look turn sent while the game has no local player is dropped. Since 2.4, a button down or a wheel turn
-   is `NotReady` while the manager does not yet know the game's mouse device (a manager that has the
-   `MouseDevice.instance` game entry knows it from the start, otherwise from the first real mouse event), and
-   nothing is queued then; a button up and a look turn are never refused for it. A manager older than 2.4 drops
-   such an action instead, with `Ok`. A handle that names no live registration is `UnknownHandle`.
-   */
-  AmmStatus (*send_pointer)(struct AmmHandle handle, uint32_t op, int32_t value);
-  /*
-   Since 2.2. Game thread. 1 while the manager panel is open, else 0. While it is open the manager refuses
-   `send_key` and `send_pointer` and has let go of every fake key and button; a mod that drives the game's input
-   reads this to stop as the person takes over, also when it held no key the panel could release. A handle that
-   names no live registration, or a call from inside a frame callback, where the host is busy, is 0.
-   */
-  uint8_t (*panel_open)(struct AmmHandle handle);
-  /*
-   Since 2.4. Game thread. Holds a movement of the local player, with no keyboard: the manager writes it into
-   the game's own move input each game tick, so the game and a server see normal input. `forward_milli` and
-   `left_milli` are the forward and left axes in thousandths, each -1000 to 1000 (positive is forward and to
-   the left); a longer diagonal is held to the length of one full axis. `flags` holds jump (bit 0,
-   `AMM_MOVE_JUMP`), sneak (bit 1, `AMM_MOVE_SNEAK`) and sprint (bit 2, `AMM_MOVE_SPRINT`), each held while
-   set, whatever the player's toggle options say. An axis past 1000 either way, or any other flag bit, is
-   `InvalidArgument`. The intent stays until the mod sends another one; all zero is the clear, always `Ok`, and
-   the game's own keys work again on the next tick. Any other intent needs an active `Input` lease of the mod
-   and a closed panel, else `NotPermitted`; it is `Unsupported` when the game entries for movement did not
-   resolve, so the mod can fall back to `send_key`, and `NotReady` while the game has no local player in a
-   world. Nothing is written while a screen is open over play. A mod that sets an intent replaces the intent of
-   another mod, which gets `FakeKeysReleased`. The manager clears the intent, and the mod, if still
-   registered, gets `FakeKeysReleased`, when its `Input` lease ends, another mod gains `Input`, the panel opens,
-   the game window loses focus (unless the mod's `full_block` keeps the focus loss from the game), the world is
-   left, or the mod is disabled; it clears with no event when the mod unregisters. A handle that names no live
-   registration is `UnknownHandle`.
-   */
-  AmmStatus (*send_move)(struct AmmHandle handle,
-                         int32_t forward_milli,
-                         int32_t left_milli,
-                         uint32_t flags);
-} AmmApi;
+  uint8_t (*held_by_other)(struct AmmHandle handle, uint8_t capability);
+} AmmLeasesTable;
 
 #endif  /* ALAYDRIEM_MOD_MANAGER_H */

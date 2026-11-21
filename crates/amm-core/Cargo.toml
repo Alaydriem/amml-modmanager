@@ -20,6 +20,8 @@ workspace = true
 
 [dependencies]
 amml-abi.workspace = true
+# `ShotId` and `ApiError` in the client-side events and errors
+amml-api.workspace = true
 serde.workspace = true
 hcl-rs.workspace = true
 hcl-edit.workspace = true

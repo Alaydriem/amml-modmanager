@@ -475,3 +475,60 @@ fn render_size_is_free_for_the_second_mod_once_the_holder_releases_it() {
     assert_eq!(rig.events(recorder), vec![ModEvent::CapabilityAvailable(Capability::RenderSize)]);
     assert_eq!(rig.acquire(recorder, Capability::RenderSize), AcquireOutcome::Granted);
 }
+
+fn input_preference(book: ResolutionBook, a: &str, b: &str, preferred: &str) -> ResolutionBook {
+    book.with_exclusive(PairKey::new(Capability::Input, a, b), ExclusiveResolution::Prefer(preferred.to_string()))
+}
+
+#[test]
+fn ranking_lists_ranked_mods_highest_first() {
+    let (mut rig, _) = Rig::new(&[]);
+    rig.book = input_preference(ResolutionBook::new(), "@a/x", "@b/y", "@a/x");
+    rig.arbiter.refresh_blocked(&rig.registry, &rig.book);
+    assert_eq!(rig.arbiter.ranking(), vec!["@a/x".to_string(), "@b/y".to_string()]);
+
+    rig.book = input_preference(ResolutionBook::new(), "@a/x", "@b/y", "@b/y");
+    rig.arbiter.refresh_blocked(&rig.registry, &rig.book);
+    assert_eq!(rig.arbiter.ranking(), vec!["@b/y".to_string(), "@a/x".to_string()]);
+}
+
+#[test]
+fn ranking_follows_a_chain_of_preferences_and_skips_other_capabilities_and_deny_second() {
+    let (mut rig, _) = Rig::new(&[]);
+    let book = input_preference(ResolutionBook::new(), "@c/z", "@b/y", "@c/z");
+    let book = input_preference(book, "@b/y", "@a/x", "@b/y");
+    let book = book.with_exclusive(
+        PairKey::new(Capability::Camera, "@d/w", "@a/x"),
+        ExclusiveResolution::Prefer("@d/w".to_string()),
+    );
+    let book = book.with_exclusive(PairKey::new(Capability::Input, "@e/v", "@a/x"), ExclusiveResolution::DenySecond);
+    rig.book = book;
+
+    rig.arbiter.refresh_blocked(&rig.registry, &rig.book);
+
+    assert_eq!(rig.arbiter.ranking(), vec!["@c/z".to_string(), "@b/y".to_string(), "@a/x".to_string()]);
+}
+
+#[test]
+fn a_loop_of_preferences_still_ranks_every_mod_once() {
+    let (mut rig, _) = Rig::new(&[]);
+    let book = input_preference(ResolutionBook::new(), "@a/x", "@b/y", "@a/x");
+    let book = input_preference(book, "@b/y", "@c/z", "@b/y");
+    rig.book = input_preference(book, "@c/z", "@a/x", "@c/z");
+
+    rig.arbiter.refresh_blocked(&rig.registry, &rig.book);
+
+    assert_eq!(rig.arbiter.ranking(), vec!["@a/x".to_string(), "@b/y".to_string(), "@c/z".to_string()]);
+}
+
+#[test]
+fn input_coexist_pairs_follow_the_suspension_resolutions() {
+    let (mut rig, _) = Rig::new(&[]);
+    rig.book = ResolutionBook::new()
+        .with_suspension(PairKey::new(Capability::Input, "@a/x", "@b/y"), SuspensionResolution::Coexist)
+        .with_suspension(PairKey::new(Capability::Camera, "@a/x", "@c/z"), SuspensionResolution::Coexist);
+
+    rig.arbiter.refresh_blocked(&rig.registry, &rig.book);
+
+    assert_eq!(rig.arbiter.coexist_ids(), [("@a/x".to_string(), "@b/y".to_string())]);
+}

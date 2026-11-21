@@ -5,8 +5,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use amm_abi::types::{
-    AmmAcquireResult, AmmApi, AmmCallbacks, AmmCapability, AmmEvent, AmmEventKind, AmmFrameInput, AmmFrameOutput,
-    AmmHandle, AmmStatus, AmmUiEventKind,
+    AmmAcquireResult, AmmCallbacks, AmmCapability, AmmEvent, AmmEventKind, AmmFrameInput, AmmFrameOutput, AmmHandle,
+    AmmStatus, AmmUiEventKind,
 };
 
 use super::{TestHost, TestMesh};
@@ -48,7 +48,7 @@ pub struct ClientState {
     pub fail_layers: AtomicU8,
 }
 
-/// One mod registered through the table with raw callbacks.
+/// One mod registered through the core table, with raw callbacks set through the layers table.
 pub struct TestClient {
     state: Arc<ClientState>,
     handle: Option<AmmHandle>,
@@ -62,16 +62,25 @@ impl TestClient {
 
     pub fn try_register(host: &TestHost, descriptor: &str, mesh: TestMesh) -> Result<TestClient, AmmStatus> {
         let config_dir = host.next_mod_dir();
-        let dir_text = config_dir.display().to_string();
         let (state, callbacks) = Self::detached(mesh);
+        let handle = Self::register_handle(descriptor, &config_dir)?;
+        let set_callbacks = TestHost::layers_table().set_callbacks.unwrap_or_else(|| panic!("set_callbacks"));
+        // SAFETY: the callbacks live for the call; their state lives as long as the client
+        let status = unsafe { set_callbacks(handle, &callbacks) };
+        assert_eq!(status, AmmStatus::Ok, "set_callbacks");
+        Ok(Self { state, handle: Some(handle), config_dir })
+    }
+
+    /// Registers a descriptor in `config_dir` through the core table, with no callbacks.
+    pub fn register_handle(descriptor: &str, config_dir: &Path) -> Result<AmmHandle, AmmStatus> {
+        let dir_text = config_dir.display().to_string();
         let mut handle = AmmHandle { slot: u16::MAX, generation: u16::MAX };
-        let register = Self::api().register.unwrap_or_else(|| panic!("register"));
-        // SAFETY: the descriptor, config folder, callbacks and handle live for the call
-        let status = unsafe {
-            register(descriptor.as_ptr(), descriptor.len(), dir_text.as_ptr(), dir_text.len(), &callbacks, &mut handle)
-        };
+        let register = TestHost::core_table().register.unwrap_or_else(|| panic!("register"));
+        // SAFETY: the descriptor, config folder and handle live for the call
+        let status =
+            unsafe { register(descriptor.as_ptr(), descriptor.len(), dir_text.as_ptr(), dir_text.len(), &mut handle) };
         match status {
-            AmmStatus::Ok => Ok(Self { state, handle: Some(handle), config_dir }),
+            AmmStatus::Ok => Ok(handle),
             other => Err(other),
         }
     }
@@ -105,10 +114,6 @@ impl TestClient {
             textures_lost: Some(Self::on_textures_lost),
         };
         (state, callbacks)
-    }
-
-    pub fn api() -> &'static AmmApi {
-        TestHost::api()
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -169,17 +174,19 @@ impl TestClient {
 
     pub fn acquire_raw(&self, capability: u8) -> AmmAcquireResult {
         // SAFETY: acquire takes plain values
-        unsafe { Self::api().acquire.unwrap_or_else(|| panic!("acquire"))(self.handle(), capability) }
+        unsafe { TestHost::leases_table().acquire.unwrap_or_else(|| panic!("acquire"))(self.handle(), capability) }
     }
 
     pub fn release_raw(&self, capability: u8) {
         // SAFETY: release takes plain values
-        unsafe { Self::api().release.unwrap_or_else(|| panic!("release"))(self.handle(), capability) }
+        unsafe { TestHost::leases_table().release.unwrap_or_else(|| panic!("release"))(self.handle(), capability) }
     }
 
     pub fn set_cursor_mode(&self, on: u8) {
         // SAFETY: set_cursor_mode takes plain values
-        unsafe { Self::api().set_cursor_mode.unwrap_or_else(|| panic!("set_cursor_mode"))(self.handle(), on) }
+        unsafe {
+            TestHost::layers_table().set_cursor_mode.unwrap_or_else(|| panic!("set_cursor_mode"))(self.handle(), on)
+        }
     }
 
     pub fn poll(&self) -> Vec<AmmEvent> {
@@ -192,34 +199,14 @@ impl TestClient {
         let mut buffer = vec![blank; 64];
         // SAFETY: the buffer has room for its length in events
         let count = unsafe {
-            Self::api().poll_events.unwrap_or_else(|| panic!("poll_events"))(handle, buffer.as_mut_ptr(), buffer.len())
+            TestHost::core_table().poll_events.unwrap_or_else(|| panic!("poll_events"))(
+                handle,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            )
         };
         buffer.truncate(count);
         buffer
-    }
-
-    pub fn log(&self, level: u8, message: &str, fields_json: &str) {
-        Self::log_handle(self.handle(), level, message, fields_json);
-    }
-
-    pub fn log_handle(handle: AmmHandle, level: u8, message: &str, fields_json: &str) {
-        let (target, file) = ("test", "test.rs");
-        // SAFETY: every text lives for the call
-        unsafe {
-            Self::api().log.unwrap_or_else(|| panic!("log"))(
-                handle,
-                level,
-                target.as_ptr(),
-                target.len(),
-                message.as_ptr(),
-                message.len(),
-                fields_json.as_ptr(),
-                fields_json.len(),
-                file.as_ptr(),
-                file.len(),
-                7,
-            )
-        }
     }
 
     pub fn unregister(&mut self) {
@@ -230,7 +217,7 @@ impl TestClient {
 
     pub fn unregister_handle(handle: AmmHandle) -> AmmStatus {
         // SAFETY: unregister takes a plain handle
-        unsafe { Self::api().unregister.unwrap_or_else(|| panic!("unregister"))(handle) }
+        unsafe { TestHost::core_table().unregister.unwrap_or_else(|| panic!("unregister"))(handle) }
     }
 
     /// The id of the holder of `capability` through the table, copied into a buffer of `capacity` bytes, with the
@@ -239,7 +226,11 @@ impl TestClient {
         let mut buffer = vec![0u8; capacity];
         // SAFETY: the buffer has room for its length in bytes for the call
         let len = unsafe {
-            Self::api().holder.unwrap_or_else(|| panic!("holder"))(capability, buffer.as_mut_ptr(), buffer.len())
+            TestHost::leases_table().holder.unwrap_or_else(|| panic!("holder"))(
+                capability,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+            )
         };
         (len, buffer)
     }
@@ -253,7 +244,7 @@ impl TestClient {
         }
         let call_back = *state.call_back_in.lock().unwrap_or_else(|error| panic!("call back: {error}"));
         if let Some(handle) = call_back {
-            let acquire = Self::api().acquire.unwrap_or_else(|| panic!("acquire"));
+            let acquire = TestHost::leases_table().acquire.unwrap_or_else(|| panic!("acquire"));
             // SAFETY: acquire takes plain values
             let result = unsafe { acquire(handle, AmmCapability::Camera as u8) };
             state.inner_outcome.store(result.outcome as u8, Ordering::SeqCst);

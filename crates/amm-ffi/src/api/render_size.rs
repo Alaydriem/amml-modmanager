@@ -3,13 +3,13 @@ use amm_core::structs::render::RenderSize;
 
 use crate::services::{Boundary, HostCell};
 
-/// Table `set_render_size`. A null `size` ends the forced size.
+/// Layers table `set_render_size`. A null `size` ends the forced size.
 ///
 /// # Safety
 ///
 /// `size` is null or readable for the call.
 pub unsafe extern "C" fn amm_set_render_size(handle: AmmHandle, size: *const AmmRenderSize) -> AmmStatus {
-    Boundary::status(Boundary::guard(|| {
+    Boundary::status(Boundary::table(|| {
         let size = if size.is_null() {
             None
         } else if !size.is_aligned() {
@@ -22,7 +22,7 @@ pub unsafe extern "C" fn amm_set_render_size(handle: AmmHandle, size: *const Amm
     }))
 }
 
-/// Table `render_size`. A null `out_state` is `NullPointer` and a `size` below the 2.0 struct is `InvalidArgument`,
+/// Layers table `render_size`. A null `out_state` is `NullPointer` and a `size` below the 3.0 struct is `InvalidArgument`,
 /// and nothing is written. The state is written up to the `size` the caller declares, which then holds the bytes
 /// written.
 ///
@@ -30,7 +30,7 @@ pub unsafe extern "C" fn amm_set_render_size(handle: AmmHandle, size: *const Amm
 ///
 /// `out_state` is null or points at a state that holds the bytes its `size` declares, writable for the call.
 pub unsafe extern "C" fn amm_render_size(handle: AmmHandle, out_state: *mut AmmRenderSizeState) -> AmmStatus {
-    Boundary::status(Boundary::guard(|| {
+    Boundary::status(Boundary::table(|| {
         let out_state = Boundary::writable(out_state)?;
         let state = HostCell::global().with(|runtime| runtime.render_size_state(handle))?;
         // SAFETY: the caller gives a state of its declared size, writable for the call

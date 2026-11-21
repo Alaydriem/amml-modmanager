@@ -21,6 +21,7 @@ workspace = true
 [dependencies]
 amm-core = { workspace = true, features = ["egui"] }
 amm-abi.workspace = true
+amml-api.workspace = true
 amm-store.workspace = true
 amm-ui.workspace = true
 amml-ui.workspace = true
@@ -33,5 +34,10 @@ time.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# `FakeGame`, a loader table for the registry tests
+amml-api = { workspace = true, features = ["test"] }
+amml-abi.workspace = true
+# The loader's provider registry, for a test registry with two owners
+amml-runtime.workspace = true
 tempfile.workspace = true
 png.workspace = true
