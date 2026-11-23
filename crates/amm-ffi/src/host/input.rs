@@ -27,7 +27,7 @@ pub extern "C" fn amm_host_pointer(kind: u8, x: f32, y: f32, button: u8, down: b
             AmmHostPointerKind::Wheel => InputEvent::Wheel { delta: wheel },
             AmmHostPointerKind::Delta => InputEvent::PointerDelta { dx: x, dy: y },
         };
-        HostCell::global().with(|runtime| Ok(runtime.route(ev, 0)))
+        HostCell::global().route(ev, 0)
     })
     .unwrap_or(AmmHostRoute::PASS)
 }

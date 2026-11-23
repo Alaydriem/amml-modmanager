@@ -12,7 +12,7 @@ pub unsafe extern "C" fn amm_set_callbacks(handle: AmmHandle, callbacks: *const 
     Boundary::status(Boundary::table(|| {
         // SAFETY: the caller gives a null or live callbacks struct of its declared size for the call, copied here
         let callbacks = unsafe { Boundary::sized_input(callbacks) }?;
-        HostCell::global().with(|runtime| runtime.set_callbacks(handle, callbacks))
+        HostCell::global().with_callbacks_held(|runtime| runtime.set_callbacks(handle, callbacks))
     }))
 }
 

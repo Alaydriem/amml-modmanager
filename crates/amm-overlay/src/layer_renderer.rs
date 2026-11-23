@@ -171,6 +171,27 @@ impl LayerRenderer {
         self.textures.free_owners(frame.freed_owners);
     }
 
+    /// True when `draw` of `layers` would do nothing: no layer in the range has drawable geometry, a texture delta or a
+    /// freed texture id. Such a range needs no context or target.
+    ///
+    /// # Safety
+    ///
+    /// As for `draw`.
+    pub unsafe fn range_is_idle(frame: &AmmHostFrame, layers: Range<usize>) -> bool {
+        // SAFETY: the caller vouches for the frame's layer pointer
+        let Some(all) = (unsafe { MeshSlices::layers(frame) }) else {
+            return true;
+        };
+        let end = layers.end.min(all.len());
+        all.get(layers.start..end).is_none_or(|range| {
+            range.iter().all(|layer| {
+                // SAFETY: the caller vouches for the mesh pointers of every layer
+                let mesh = unsafe { MeshSlices::new(&layer.mesh) };
+                !mesh.usable() && mesh.deltas.is_empty() && mesh.freed.is_empty()
+            })
+        })
+    }
+
     /// The index of the first manager layer of `frame`, or its layer count when it has none. The layers before it
     /// are the mod layers.
     ///

@@ -24,10 +24,34 @@ pub struct SurfaceRig {
 
 impl SurfaceRig {
     pub fn new() -> Self {
+        Self::with(None)
+    }
+
+    /// A rig on a loader that makes the surface on demand: the listener gets a waiting surface (no context, target
+    /// or back buffer) and `surface` is made for it on its first ask, which the fake counts.
+    pub fn on_demand(surface: AmmlDrawSurface) -> Self {
+        Self::with(Some(surface))
+    }
+
+    /// The surface a loader that makes it on demand lends before a listener asks: no context, target or back buffer.
+    pub fn waiting(surface: AmmlDrawSurface) -> AmmlDrawSurface {
+        AmmlDrawSurface {
+            context: std::ptr::null_mut(),
+            target: std::ptr::null_mut(),
+            back_buffer: std::ptr::null_mut(),
+            ..surface
+        }
+    }
+
+    fn with(on_demand: Option<AmmlDrawSurface>) -> Self {
         let fake = FakeGame::new();
         fake.offer::<FramePresent>();
         fake.offer::<SurfaceLost>();
         fake.offer_area(Area::OVERLAY_SURFACE);
+        if let Some(surface) = on_demand {
+            fake.offer_surface_on_demand();
+            fake.set_prepared_surface(surface);
+        }
         let host = TestHost::leaked();
         let renderer = Arc::new(Mutex::new(SurfaceRenderer::new(host)));
         let request = Arc::new(Mutex::new(RigRequest::Draw));

@@ -62,13 +62,18 @@ impl TestClient {
 
     pub fn try_register(host: &TestHost, descriptor: &str, mesh: TestMesh) -> Result<TestClient, AmmStatus> {
         let config_dir = host.next_mod_dir();
-        let (state, callbacks) = Self::detached(mesh);
         let handle = Self::register_handle(descriptor, &config_dir)?;
+        Ok(Self::attach(handle, config_dir, mesh))
+    }
+
+    /// A client for a mod already registered with `register_handle` in `config_dir`: sets its callbacks.
+    pub fn attach(handle: AmmHandle, config_dir: PathBuf, mesh: TestMesh) -> TestClient {
+        let (state, callbacks) = Self::detached(mesh);
         let set_callbacks = TestHost::layers_table().set_callbacks.unwrap_or_else(|| panic!("set_callbacks"));
         // SAFETY: the callbacks live for the call; their state lives as long as the client
         let status = unsafe { set_callbacks(handle, &callbacks) };
         assert_eq!(status, AmmStatus::Ok, "set_callbacks");
-        Ok(Self { state, handle: Some(handle), config_dir })
+        Self { state, handle: Some(handle), config_dir }
     }
 
     /// Registers a descriptor in `config_dir` through the core table, with no callbacks.

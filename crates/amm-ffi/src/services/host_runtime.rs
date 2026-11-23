@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use amm_abi::types::{AmmCallbacks, AmmEvent, AmmFrameOutput, AmmHandle, AmmStatus};
+use amm_abi::types::{AmmCallbacks, AmmEvent, AmmHandle, AmmStatus};
 use amm_core::config::ManagerConfig;
 use amm_core::errors::ManagerError;
 use amm_core::services::descriptor::DescriptorChecker;
@@ -13,7 +13,7 @@ use amm_core::services::settings::{ChordText, ManagerConfigFile};
 use amm_core::services::{PanicGuard, PathRules};
 use amm_core::structs::descriptor::Capability;
 use amm_core::structs::event::ModEvent;
-use amm_core::structs::frame::{FrameInputData, LayerKind, UiEvent, UiEventKind};
+use amm_core::structs::frame::{FrameInputData, UiEvent, UiEventKind};
 use amm_core::structs::icon::ModIcon;
 use amm_core::structs::input::GameViewport;
 use amm_core::structs::input::{InputEvent, Modifiers, RouteDecision};
@@ -32,7 +32,9 @@ use amm_ui::model::{PanelAction, PanelModel};
 use amm_ui::runtime::PanelRuntime;
 use amml_ui::font::FontSource;
 
-use super::{ClientSlot, FrameCompositor, HolderBook, HostShared, LogBridge, TableGate, UiEventBuffer};
+use super::{
+    ClientSlot, FrameCompositor, FrameJob, FrameStart, HolderBook, HostShared, LogBridge, TableGate, UiEventBuffer,
+};
 use crate::types::{AmmHostFrame, AmmHostFrameInput, AmmHostRoute};
 
 /// Everything the manager DLL runs: the manager service, the config writer thread, the panel, the compositor, one
@@ -45,6 +47,8 @@ pub struct HostRuntime {
     io: Option<IoThread>,
     panel: PanelRuntime,
     compositor: Option<FrameCompositor>,
+    // the texture grant of each mod slot that registered while a Present held the compositor, given at `end_frame`
+    pending_grants: [Option<TextureGrant>; ModMask::CAPACITY],
     slots: Vec<ClientSlot>,
     // the config folder each live mod registered with, one entry per slot
     mod_dirs: Vec<Option<PathBuf>>,
@@ -105,6 +109,7 @@ impl HostRuntime {
             io: Some(io),
             panel: PanelRuntime::new(FontSource::Embedded, manager.locale()),
             compositor: Some(FrameCompositor::new(&budgets)),
+            pending_grants: [None; ModMask::CAPACITY],
             slots: (0..slot_count).map(|_| ClientSlot::new(budgets.event_queue)).collect(),
             mod_dirs: vec![None; slot_count],
             mods_root: PathRules::mods_root(&config_dir).map(Path::to_path_buf),
@@ -187,8 +192,16 @@ impl HostRuntime {
             return Err(AmmStatus::TooManyMods);
         };
         let generation = slot.occupy();
-        if let (Some(compositor), Some(grant)) = (self.compositor.as_mut(), self.manager.texture_grant(index)) {
-            compositor.grant_textures(index.0, grant);
+        if let Some(grant) = self.manager.texture_grant(index) {
+            match self.compositor.as_mut() {
+                Some(compositor) => compositor.grant_textures(index.0, grant),
+                // a Present holds the compositor while its frame callbacks run; `end_frame` gives the grant
+                None => {
+                    if let Some(pending) = self.pending_grants.get_mut(usize::from(index.0)) {
+                        *pending = Some(grant);
+                    }
+                }
+            }
         }
         if let Some(dir) = self.mod_dirs.get_mut(usize::from(index.0)) {
             *dir = Some(mod_dir);
@@ -417,8 +430,12 @@ impl HostRuntime {
         AmmHostRoute { consume: decision.consume_from_game }
     }
 
-    /// Composes one Present: takes the size message for the game, then builds the layers.
-    pub fn frame(&mut self, input: &AmmHostFrameInput) -> AmmHostFrame {
+    /// Starts one Present under the host lock: takes the size message for the game, then the compositor, which
+    /// takes the frame callbacks of the drawn layers out (`FrameCompositor::begin`). The caller runs them without the
+    /// lock (`FrameCompositor::run_callbacks`) and gives the compositor back to `end_frame`. `None` when a compose
+    /// already holds the compositor.
+    pub fn begin_frame(&mut self, input: &AmmHostFrameInput) -> FrameStart {
+        self.route_pending();
         self.now_ms = input.now_ms.max(self.now_ms);
         self.back_buffer = GamePicture::new(input.width, input.height);
         if self.shared.take_window_changed() {
@@ -435,36 +452,77 @@ impl HostRuntime {
             }
         }
         let Some(mut compositor) = self.compositor.take() else {
+            return FrameStart { compositor: None, message, callbacks: false };
+        };
+        let begun = PanicGuard::run(
+            || compositor.begin(self, input),
+            |_| curia::error!("frame compose panicked, nothing drawn this frame"),
+        );
+        FrameStart { callbacks: begun.unwrap_or(false), compositor: Some(compositor), message }
+    }
+
+    /// Ends the Present `begin_frame` started, under the host lock: the compositor records what the callbacks gave
+    /// back and builds the layers, and is kept for the next Present.
+    pub fn end_frame(&mut self, start: FrameStart, input: &AmmHostFrameInput) -> AmmHostFrame {
+        let FrameStart { compositor, message, .. } = start;
+        let Some(mut compositor) = compositor else {
             return AmmHostFrame::empty().with_size_message(message);
         };
+        for (slot, pending) in self.pending_grants.iter_mut().enumerate() {
+            if let (Some(grant), Ok(owner)) = (pending.take(), u8::try_from(slot)) {
+                compositor.grant_textures(owner, grant);
+            }
+        }
         let composed = PanicGuard::run(
-            || compositor.compose(self, input),
+            || compositor.end(self, input),
             |_| curia::error!("frame compose panicked, nothing drawn this frame"),
         );
         self.compositor = Some(compositor);
         composed.unwrap_or_else(AmmHostFrame::empty).with_size_message(message)
     }
 
-    /// Calls the frame callback of the mod in `index` for the layer `kind`, `allowed_layers` holding that layer's
-    /// one bit, with the events routed to that layer, which are then cleared.
-    pub fn call_frame(
+    /// Composes one Present in one call, frame callbacks included, under the host lock.
+    pub fn frame(&mut self, input: &AmmHostFrameInput) -> AmmHostFrame {
+        let mut start = self.begin_frame(input);
+        if start.callbacks
+            && let Some(compositor) = start.compositor.as_mut()
+        {
+            let _ = PanicGuard::run(
+                // SAFETY: the host lock is held for the whole call, so no `unregister` or `set_callbacks` returns
+                || unsafe { compositor.run_callbacks(input) },
+                |_| curia::error!("frame callbacks panicked, the frame ends with what it has"),
+            );
+        }
+        self.end_frame(start, input)
+    }
+
+    /// Moves the frame callback of the layer `entry` of the mod in `index` into `job`, with the events routed to
+    /// that layer, its input flags and whether it may draw the game picture. False, with the job untouched, when the
+    /// mod has no frame callback.
+    pub fn take_frame_job(
         &mut self,
         index: ModIndex,
-        input: &AmmHostFrameInput,
-        (kind, allowed_layers): (LayerKind, u8),
-        input_flags: u8,
-    ) -> Option<(i32, AmmFrameOutput)> {
-        let slot = self.slots.get_mut(usize::from(index.0))?;
-        let base = FrameInputData {
-            width: input.width,
-            height: input.height,
-            pixels_per_point: input.pixels_per_point,
-            time_secs: input.time_secs,
-            events: &[],
-            allowed_layers,
-            input_flags,
+        entry: LayerEntry,
+        (flags, picture): (u8, bool),
+        job: &mut FrameJob,
+    ) -> bool {
+        let Some(slot) = self.slots.get_mut(usize::from(index.0)) else {
+            return false;
         };
-        slot.run_frame(&base, kind)
+        let Some(callbacks) = slot.frame_callbacks() else {
+            return false;
+        };
+        job.prepare(entry, callbacks, flags, picture);
+        slot.take_events(entry.kind, job.events_mut());
+        true
+    }
+
+    /// Routes the pointer move that passed without the host lock (`HostCell::route`), if one waits, so the
+    /// tracked pointer and the layers' events are as if it had been routed when it came.
+    pub fn route_pending(&mut self) {
+        if let Some((x, y)) = self.shared.take_pending_pointer() {
+            self.route(InputEvent::PointerMove { x, y }, self.now_ms);
+        }
     }
 
     /// Drops the routed events of every slot.

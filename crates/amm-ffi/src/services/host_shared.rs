@@ -30,11 +30,16 @@ pub struct HostShared {
     // other, so a reader may see the size of one Present with the format of the one before
     back_buffer: AtomicU64,
     back_buffer_format: AtomicU32,
+    // the last pointer move passed without the host lock, its x and y bits packed by `pack_point`, `NO_POINT` for
+    // none; the next call under the lock routes it
+    pending_pointer: AtomicU64,
 }
 
 impl HostShared {
     const LIVE: u32 = 1 << 16;
     const WIDTH_SHIFT: u32 = 32;
+    // two all-ones f32 bit patterns, a NaN pair no pointer position has
+    const NO_POINT: u64 = u64::MAX;
 
     pub fn new(snapshot: Arc<ArcSwap<RenderSnapshot>>, holders: Arc<HolderBook>) -> Self {
         Self {
@@ -49,6 +54,7 @@ impl HostShared {
             window_changed: AtomicBool::new(false),
             back_buffer: AtomicU64::new(0),
             back_buffer_format: AtomicU32::new(0),
+            pending_pointer: AtomicU64::new(Self::NO_POINT),
         }
     }
 
@@ -145,6 +151,32 @@ impl HostShared {
     /// The back buffer size and DXGI format of the last Present, 0 x 0 and 0 before the first.
     pub fn back_buffer(&self) -> (RenderSize, u32) {
         (Self::unpack(self.back_buffer.load(Ordering::Relaxed)), self.back_buffer_format.load(Ordering::Relaxed))
+    }
+
+    /// True when a pointer move would change nothing but the tracked pointer position: no layer, the panel
+    /// closed, no menu button placed and no forced render size. Such a move can pass without the host lock.
+    pub fn pointer_quiet(&self) -> bool {
+        let snapshot = self.snapshot.load();
+        snapshot.layers.is_empty() && !snapshot.panel_open && !self.menu_button_placed() && self.forced_size().is_none()
+    }
+
+    /// True when the game's mouse feed keeps its own point: no layer can hold a game viewport under the cursor and
+    /// no render size is forced.
+    pub fn game_point_idle(&self) -> bool {
+        self.snapshot.load().layers.is_empty() && self.forced_size().is_none()
+    }
+
+    /// Keeps a pointer move that passed without the host lock; a later one replaces it.
+    pub fn set_pending_pointer(&self, x: f32, y: f32) {
+        let packed = (u64::from(x.to_bits()) << Self::WIDTH_SHIFT) | u64::from(y.to_bits());
+        self.pending_pointer.store(packed, Ordering::Relaxed);
+    }
+
+    /// The pointer move kept by `set_pending_pointer` since the last call.
+    pub fn take_pending_pointer(&self) -> Option<(f32, f32)> {
+        let packed = self.pending_pointer.swap(Self::NO_POINT, Ordering::Relaxed);
+        (packed != Self::NO_POINT)
+            .then(|| (f32::from_bits((packed >> Self::WIDTH_SHIFT) as u32), f32::from_bits(packed as u32)))
     }
 
     fn pack(size: RenderSize) -> u64 {

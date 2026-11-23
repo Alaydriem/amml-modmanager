@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use amm_abi::types::{AmmCursorShape, AmmDrawCmd, AmmFrameOutput, AmmMeshView, AmmStatus, AmmTextureDelta, AmmVertex};
@@ -11,10 +12,11 @@ use amm_core::structs::registry::{ModIndex, ModMask};
 use amm_core::structs::snapshot::{LayerEntry, RenderSnapshot};
 use amm_ui::model::PanelAction;
 
-use super::{HostRuntime, OwnerFrameUse, TextureBudget};
+use super::{FrameJob, HostRuntime, JobOutcome, OwnerFrameUse, TextureBudget};
 use crate::types::{AmmHostFrame, AmmHostFrameInput, AmmHostLayer};
 
-/// Builds the layer list of one Present. It calls the frame callback of each drawn layer, once per layer with that
+/// Builds the layer list of one Present, in three steps: `begin` and `end` under the host lock, and `run_callbacks`
+/// between them without it. It calls the frame callback of each drawn layer, once per layer with that
 /// layer's one bit in `allowed_layers`, checks what comes back, keeps each mod inside its vertex and texture
 /// budgets, runs the panel pass, and fills a reused layer array. The two layers of one mod share its owner byte, its
 /// texture ids and its budgets: the per-frame budgets count the sum of its layers in one compose. Every layer points
@@ -53,6 +55,20 @@ pub struct FrameCompositor {
     upload_limit: u64,
     delta_limit: usize,
     freed_limit: usize,
+    // one job per drawn layer of a compose, `job_count` of them in use between `begin` and `end`
+    jobs: Vec<FrameJob>,
+    job_count: usize,
+    // the compose draws something: a layer, the panel, a toast or the menu button
+    drawn: bool,
+    // a toast was visible when the compose began
+    toast: bool,
+    // telemetry was on when the compose began, so the callbacks are timed
+    timed: bool,
+    // the manager's telemetry, for `run_callbacks`, between `begin` and `end`
+    telemetry: Option<Arc<Telemetry>>,
+    // one bit per mod slot that one more failed frame disables: once a layer of it fails in `run_callbacks`, its
+    // later layers of the compose are not called, as when the callbacks ran under the lock
+    last_chance: u32,
     panel_mesh: MeshBuffers,
     panel_actions: Vec<PanelAction>,
     // the composed line was written for this open of the panel
@@ -62,7 +78,8 @@ pub struct FrameCompositor {
 }
 
 // SAFETY: the raw pointers in the layer array point only into this compositor's own copies. They are handed to
-// the overlay and never read here, and the compositor is only used under the host lock.
+// the overlay and never read here. The compositor is used under the host lock, except `run_callbacks`, which the
+// one compose that took the compositor out of the host runs on its own thread; the telemetry it holds is atomics.
 unsafe impl Send for FrameCompositor {}
 
 impl FrameCompositor {
@@ -92,6 +109,13 @@ impl FrameCompositor {
             cmd_limit: usize::try_from(budgets.draw_cmds_per_mod).unwrap_or(usize::MAX),
             upload_limit: budgets.upload_bytes_per_frame,
             freed_limit: usize::try_from(budgets.freed_ids_per_frame).unwrap_or(usize::MAX),
+            jobs: (0..RenderSnapshot::MAX_LAYERS).map(|_| FrameJob::new(budgets.event_queue)).collect(),
+            job_count: 0,
+            drawn: false,
+            toast: false,
+            timed: false,
+            telemetry: None,
+            last_chance: 0,
             panel_mesh: MeshBuffers::new(),
             panel_actions: Vec::new(),
             panel_logged: false,
@@ -99,18 +123,20 @@ impl FrameCompositor {
         }
     }
 
-    /// The layers of one Present, valid until the next call. With no layer, no toast, the panel closed and the
-    /// menu button hidden it returns at once with no layers.
-    pub fn compose(&mut self, rt: &mut HostRuntime, input: &AmmHostFrameInput) -> AmmHostFrame {
+    /// Starts the layers of one Present, under the host lock: frees the copies of owners that left, and moves the
+    /// frame callback of each drawn layer into a job (`HostRuntime::take_frame_job`). True when jobs wait for
+    /// `run_callbacks`; false when there is no layer to call. `end` finishes the Present either way.
+    pub fn begin(&mut self, rt: &mut HostRuntime, input: &AmmHostFrameInput) -> bool {
         self.layers.clear();
         self.used = [OwnerFrameUse::new(); Self::OWNERS];
         self.failed = 0;
         self.succeeded = 0;
         self.game_picture = false;
+        self.job_count = 0;
         self.release_marked(rt.manager().telemetry());
         rt.manager_mut().set_menu_screen(MenuScreen::from_code(input.menu_screen));
         let snapshot = rt.manager().snapshot();
-        let toast = rt.toast_visible(input.now_ms);
+        self.toast = rt.toast_visible(input.now_ms);
         // from the replies of the last compose, so a covering layer that is gone no longer hides the row
         rt.manager_mut().update_overlay_covers((input.width, input.height));
         let button = rt.manager().menu_button_visible();
@@ -118,32 +144,147 @@ impl FrameCompositor {
             self.panel_logged = false;
             self.refusal_logged = false;
         }
-        if snapshot.layers.is_empty() && !snapshot.panel_open && !toast && !button {
+        self.drawn = !snapshot.layers.is_empty() || snapshot.panel_open || self.toast || button;
+        if !self.drawn {
+            return false;
+        }
+        self.timed = rt.manager().config().telemetry;
+        self.telemetry = Some(rt.manager().shared_telemetry());
+        self.last_chance = 0;
+        for entry in snapshot.layers.iter() {
+            let index = entry.mod_index;
+            let failed = rt.manager().registry().get(index).is_none_or(|registered| registered.failed);
+            if usize::from(index.0) >= ModMask::CAPACITY || failed {
+                continue;
+            }
+            let mut flags = FrameInputData::ALLOW_POINTER | FrameInputData::ALLOW_KEYBOARD;
+            if rt.manager().arbiter().holds(index, Capability::Input) || rt.manager().keyboard_owner() == Some(index) {
+                flags |= FrameInputData::ALLOW_NAV_KEYS;
+            }
+            let Some(job) = self.jobs.get_mut(self.job_count) else {
+                break;
+            };
+            let picture = rt.manager().arbiter().holds(index, Capability::Overlay);
+            if rt.take_frame_job(index, *entry, (flags, picture), job) {
+                self.job_count += 1;
+                if rt.manager().at_last_frame_failure(index) {
+                    self.last_chance |= 1 << index.0;
+                }
+            }
+        }
+        // the events of layers that are not called this frame
+        rt.clear_ui_events();
+        self.job_count > 0
+    }
+
+    /// Runs the frame callbacks `begin` took out, in layer order, and checks and copies each layer's mesh right after
+    /// its call, before the mod's next callback runs (the mesh is valid only until then). It needs no host state, so
+    /// the caller runs it without the host lock. What needs the host (failure counts, replies, the cursor) waits in
+    /// each job for `end`.
+    ///
+    /// # Safety
+    ///
+    /// No `unregister` or `set_callbacks` of a mod with a job returns until this call has returned.
+    pub unsafe fn run_callbacks(&mut self, input: &AmmHostFrameInput) {
+        // SAFETY: the caller's promise is passed on
+        unsafe { self.run_callbacks_with(input, |_| {}) };
+    }
+
+    /// `run_callbacks` that hands each job's outcome to `after_each` once the job is done; tests use it to stop the
+    /// step part way.
+    ///
+    /// # Safety
+    ///
+    /// As for `run_callbacks`.
+    pub unsafe fn run_callbacks_with(&mut self, input: &AmmHostFrameInput, mut after_each: impl FnMut(JobOutcome)) {
+        let Some(telemetry) = self.telemetry.clone() else {
+            return;
+        };
+        let mut stopped = 0u32;
+        // the jobs stay in place (each is reached by index), so a panic part way leaves the job array whole
+        for at in 0..self.job_count {
+            let Some(job) = self.jobs.get_mut(at) else {
+                break;
+            };
+            let (Some(entry), picture) = (job.entry(), job.picture()) else {
+                continue;
+            };
+            let bit = 1u32.checked_shl(u32::from(entry.mod_index.0)).unwrap_or(0);
+            if stopped & bit != 0 {
+                continue;
+            }
+            let started = self.timed.then(Instant::now);
+            // SAFETY: the caller keeps every job's callbacks valid for the call
+            let Some((status, out)) = (unsafe { job.call(input) }) else {
+                continue;
+            };
+            // SAFETY: the mod's frame contract keeps the mesh view it just gave valid until its next frame call, which
+            // comes after this check and copy
+            let outcome = unsafe { self.check_layer(entry, picture, (status, &out), input, &telemetry) };
+            if let (Some(started), JobOutcome::Drawn { .. }) = (started, outcome) {
+                let owner = usize::from(entry.mod_index.0);
+                let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let used = &mut self.used[owner];
+                used.frame_ns = used.frame_ns.saturating_add(elapsed);
+                telemetry.record_frame(entry.mod_index, used.frame_ns, used.sent_vertices as u64);
+            }
+            if outcome == JobOutcome::Failed && self.last_chance & bit != 0 {
+                stopped |= bit;
+            }
+            if let Some(job) = self.jobs.get_mut(at) {
+                job.set_outcome(outcome);
+            }
+            after_each(outcome);
+        }
+    }
+
+    /// Ends the Present `begin` started, under the host lock: counts the failed layers, records the replies of the
+    /// drawn ones, runs the panel pass, and returns the layers, valid until the next `begin`. With no layer, no
+    /// toast, the panel closed and the menu button hidden it has no layers.
+    pub fn end(&mut self, rt: &mut HostRuntime, input: &AmmHostFrameInput) -> AmmHostFrame {
+        if !self.drawn {
             return self.finish(rt, AmmCursorShape::Default);
         }
         let telemetry = rt.manager().shared_telemetry();
         let pointer_layer = rt.manager().pointer_layer();
+        let (x, y) = rt.pointer();
         let mut cursor = AmmCursorShape::Default;
         let mut owner_cursor = None;
-        for entry in snapshot.layers.iter() {
-            let Some((shape, under)) = self.client_layer(rt, entry, input, &telemetry) else {
+        for at in 0..self.job_count {
+            let Some(job) = self.jobs.get_mut(at) else {
+                break;
+            };
+            let entry = job.entry();
+            let outcome = job.take_outcome();
+            let Some(entry) = entry else {
                 continue;
             };
-            if pointer_layer == Some(*entry) {
-                owner_cursor = Some(shape);
-            } else if under {
-                cursor = shape;
+            match outcome {
+                JobOutcome::NotRun => {}
+                JobOutcome::Failed => self.fail_frame(rt, entry.mod_index, input.now_ms),
+                JobOutcome::Drawn { reply, draw } => {
+                    rt.manager_mut().record_frame_reply(entry.mod_index, entry.kind, reply);
+                    let shape = AmmCursorShape::from(reply.cursor);
+                    let [min_x, min_y, max_x, max_y] = reply.layer_rect;
+                    if pointer_layer == Some(entry) {
+                        owner_cursor = Some(shape);
+                    } else if draw && x >= min_x && x < max_x && y >= min_y && y < max_y {
+                        cursor = shape;
+                    }
+                }
             }
         }
+        self.job_count = 0;
+        self.telemetry = None;
         self.end_runs(rt);
         rt.manager_mut().update_overlay_covers((input.width, input.height));
         let button = rt.manager().menu_button_visible();
-        rt.clear_ui_events();
         let cursor = owner_cursor.unwrap_or(cursor);
-        if snapshot.panel_open || toast || button {
+        let panel_open = rt.manager().snapshot().panel_open;
+        if panel_open || self.toast || button {
             self.panel_layer(rt, input, &telemetry);
         }
-        self.finish(rt, if snapshot.panel_open { AmmCursorShape::Default } else { cursor })
+        self.finish(rt, if panel_open { AmmCursorShape::Default } else { cursor })
     }
 
     /// Gives a mod that registered its texture budget.
@@ -218,30 +359,27 @@ impl FrameCompositor {
         }
     }
 
-    // Runs the frame of one layer of a mod and adds the layer. Returns the cursor of its reply and whether the
-    // pointer is over the drawn layer. A mod whose earlier layer of this compose failed too often is not called again.
-    fn client_layer(
+    // Checks what the frame callback of one layer gave back and, when it is good, copies its mesh into the layer's
+    // buffers and adds the layer.
+    //
+    // # Safety
+    //
+    // Every pointer of `out.mesh` is null or valid for its count for the call.
+    unsafe fn check_layer(
         &mut self,
-        rt: &mut HostRuntime,
-        entry: &LayerEntry,
+        entry: LayerEntry,
+        picture: bool,
+        (status, out): (i32, &AmmFrameOutput),
         input: &AmmHostFrameInput,
         telemetry: &Telemetry,
-    ) -> Option<(AmmCursorShape, bool)> {
+    ) -> JobOutcome {
         let index = entry.mod_index;
         let owner = usize::from(index.0);
-        let failed = rt.manager().registry().get(index).is_none_or(|registered| registered.failed);
-        if owner >= ModMask::CAPACITY || failed {
-            return None;
+        if owner >= ModMask::CAPACITY {
+            return JobOutcome::NotRun;
         }
-        let mut flags = FrameInputData::ALLOW_POINTER | FrameInputData::ALLOW_KEYBOARD;
-        if rt.manager().arbiter().holds(index, Capability::Input) || rt.manager().keyboard_owner() == Some(index) {
-            flags |= FrameInputData::ALLOW_NAV_KEYS;
-        }
-        let started = rt.manager().config().telemetry.then(Instant::now);
-        let (status, out) = rt.call_frame(index, input, (entry.kind, entry.allowed), flags)?;
-        let Some(reply) = Self::reply(status, &out) else {
-            self.fail_frame(rt, index, input.now_ms);
-            return None;
+        let Some(reply) = Self::reply(status, out) else {
+            return JobOutcome::Failed;
         };
         let counts = (out.mesh.vertex_count, out.mesh.index_count, out.mesh.cmd_count);
         self.used[owner].sent_vertices += out.mesh.vertex_count;
@@ -250,32 +388,19 @@ impl FrameCompositor {
             telemetry.record_vertex_skip();
         }
         let buffer = Self::buffer(owner, entry.kind);
-        let picture = rt.manager().arbiter().holds(index, Capability::Overlay);
-        // SAFETY: the mod's frame contract keeps every pointer of its mesh view valid until its next frame call;
-        // the view is only read here, under the host lock, and everything kept is copied
+        // SAFETY: the caller vouches for the mesh view; everything kept is copied
         let Some(mesh) = (unsafe { self.sanitize(index.0, buffer, &out.mesh, input, telemetry, (draw, picture)) })
         else {
-            self.fail_frame(rt, index, input.now_ms);
-            return None;
+            return JobOutcome::Failed;
         };
         if draw {
             self.used[owner].add_draw(counts);
         }
         self.succeeded |= 1 << owner;
-        rt.manager_mut().record_frame_reply(index, entry.kind, reply);
-        if let Some(started) = started {
-            let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            let used = &mut self.used[owner];
-            used.frame_ns = used.frame_ns.saturating_add(elapsed);
-            telemetry.record_frame(index, used.frame_ns, used.sent_vertices as u64);
-        }
         telemetry.record_texture_bytes(index, self.budget.used(index.0));
         telemetry.record_retained_bytes(index, self.retained_bytes(index.0));
         self.layers.push(AmmHostLayer { owner: index.0, mesh });
-        let (x, y) = rt.pointer();
-        let [min_x, min_y, max_x, max_y] = reply.layer_rect;
-        let under = draw && x >= min_x && x < max_x && y >= min_y && y < max_y;
-        Some((AmmCursorShape::from(reply.cursor), under))
+        JobOutcome::Drawn { reply, draw }
     }
 
     // Ends the run of failures of each mod whose layers all succeeded in this compose.
@@ -332,7 +457,7 @@ impl FrameCompositor {
     }
 
     // The reply of a frame callback that returned Ok and valid bytes.
-    fn reply(status: i32, out: &AmmFrameOutput) -> Option<FrameReplyData> {
+    pub(crate) fn reply(status: i32, out: &AmmFrameOutput) -> Option<FrameReplyData> {
         if AmmStatus::try_from(status) != Ok(AmmStatus::Ok) {
             return None;
         }
@@ -357,26 +482,12 @@ impl FrameCompositor {
         (draw, picture): (bool, bool),
     ) -> Option<AmmMeshView> {
         // SAFETY: the caller guarantees every pointer and count of the view
-        let Some((vertices, indices, cmds, deltas, bytes, freed)) = (unsafe { Self::slices(view) }) else {
-            self.note_refusal(owner, "mesh pointer null or misaligned");
-            return None;
-        };
-        let checked_cmds = cmds.iter().all(|cmd| Self::cmd_is_valid(cmd, indices.len()));
-        let checked_deltas = deltas.iter().all(|delta| Self::delta_is_valid(delta, bytes.len()));
-        // the overlay draws every layer from one shared vertex buffer, so an index past this mesh's own vertices
-        // would read another layer's
-        let checked_indices = indices.iter().all(|&index| (index as usize) < vertices.len());
-        if !checked_cmds || !checked_deltas || !checked_indices {
-            let reason = if !checked_cmds {
-                "draw command invalid"
-            } else if !checked_deltas {
-                "texture delta invalid"
-            } else {
-                "index past the vertices"
-            };
+        if let Some(reason) = unsafe { Self::mesh_fault(view) } {
             self.note_refusal(owner, reason);
             return None;
         }
+        // SAFETY: as above; `mesh_fault` found the pointers good
+        let (vertices, indices, cmds, deltas, bytes, freed) = unsafe { Self::slices(view) }?;
         let slot = Self::slot(owner)?;
         if buffer >= Self::BUFFERS {
             return None;
@@ -487,6 +598,30 @@ impl FrameCompositor {
         }
         *logged = true;
         curia::info!("panel layer refused", { reason: reason });
+    }
+
+    // Why the mesh view is refused, or `None` for a good view: a null or misaligned pointer, a bad command, a bad
+    // delta, or an index past the mesh's own vertices (the overlay draws every layer from one shared vertex buffer,
+    // so such an index would read another layer's).
+    //
+    // # Safety
+    //
+    // Every pointer of `view` is null or valid for its count for the call.
+    pub(crate) unsafe fn mesh_fault(view: &AmmMeshView) -> Option<&'static str> {
+        // SAFETY: the caller guarantees every pointer and count of the view
+        let Some((vertices, indices, cmds, deltas, bytes, _)) = (unsafe { Self::slices(view) }) else {
+            return Some("mesh pointer null or misaligned");
+        };
+        if !cmds.iter().all(|cmd| Self::cmd_is_valid(cmd, indices.len())) {
+            return Some("draw command invalid");
+        }
+        if !deltas.iter().all(|delta| Self::delta_is_valid(delta, bytes.len())) {
+            return Some("texture delta invalid");
+        }
+        if !indices.iter().all(|&index| (index as usize) < vertices.len()) {
+            return Some("index past the vertices");
+        }
+        None
     }
 
     #[allow(clippy::type_complexity)]

@@ -1,6 +1,5 @@
-use amm_abi::types::{AmmCallbacks, AmmFrameInput, AmmFrameOutput, AmmHandle};
-use amm_core::structs::frame::{FrameInputData, LayerKind};
-use amm_core::traits::AbiSized;
+use amm_abi::types::{AmmCallbacks, AmmHandle};
+use amm_core::structs::frame::LayerKind;
 
 use super::UiEventBuffer;
 
@@ -16,7 +15,8 @@ pub struct ClientSlot {
 }
 
 // SAFETY: the callbacks hold the mod's `user` pointer, which the manager never reads. It is only passed back to the
-// mod's own callbacks on the render thread under the host lock, as the `AmmCallbacks` contract allows.
+// mod's own callbacks on the render thread, while `unregister` and `set_callbacks` of the mod cannot return, as the
+// `AmmCallbacks` contract allows.
 unsafe impl Send for ClientSlot {}
 
 impl ClientSlot {
@@ -70,21 +70,16 @@ impl ClientSlot {
         &self.document
     }
 
-    /// Calls the mod's frame callback for the layer `kind` with `base` and the routed events of that layer, then
-    /// clears them. Returns the status the callback gave and what it filled in, or `None` when the mod has no frame
-    /// callback.
-    pub fn run_frame(&mut self, base: &FrameInputData, kind: LayerKind) -> Option<(i32, AmmFrameOutput)> {
-        let callbacks = self.callbacks.as_ref()?;
-        let frame = callbacks.frame?;
-        let events = &mut self.events[kind.slot()];
-        let data = FrameInputData { events: events.as_slice(), ..*base };
-        let input = AmmFrameInput::from(&data);
-        let mut out = Self::blank_output();
-        // SAFETY: the mod gave this callback and user with set_callbacks and keeps both valid until unregister returns,
-        // which cannot happen while the host lock is held; input and its events live for the call
-        let status = unsafe { frame(callbacks.user, &input, &mut out) };
-        events.clear();
-        Some((status, out))
+    /// The mod's callbacks when it set a frame callback.
+    pub fn frame_callbacks(&self) -> Option<AmmCallbacks> {
+        self.callbacks.filter(|callbacks| callbacks.frame.is_some())
+    }
+
+    /// Moves the routed events of the layer `kind` into `into`, and leaves the slot `into`'s old, cleared storage.
+    /// Neither side allocates.
+    pub fn take_events(&mut self, kind: LayerKind, into: &mut UiEventBuffer) {
+        into.clear();
+        std::mem::swap(&mut self.events[kind.slot()], into);
     }
 
     /// Tells the mod that the host lost every texture.
@@ -108,9 +103,5 @@ impl ClientSlot {
         for events in self.events.iter_mut() {
             events.clear();
         }
-    }
-
-    fn blank_output() -> AmmFrameOutput {
-        AmmFrameOutput::blank()
     }
 }

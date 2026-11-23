@@ -20,9 +20,10 @@ impl ManagerInputSink {
         Self::new(HostCell::global())
     }
 
-    /// Places one input event; true when the game must not see it. False with no host. It does not allocate.
+    /// Places one input event; true when the game must not see it. False with no host. It does not allocate. A
+    /// pointer move nothing can take passes without the host lock (`HostCell::route`).
     pub fn route(&self, event: InputEvent, now_ms: u64) -> bool {
-        self.cell.with(|runtime| Ok(runtime.route(event, now_ms).consume)).unwrap_or(false)
+        self.cell.route(event, now_ms).is_ok_and(|route| route.consume)
     }
 
     /// Whether a key press another listener cancelled still goes to the host: only while the panel is open, or

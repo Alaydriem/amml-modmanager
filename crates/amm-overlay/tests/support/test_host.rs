@@ -16,14 +16,23 @@ pub struct TestHost {
     picture: AtomicBool,
     /// `frame` gives a mod layer red over the left half and a manager layer blue over the right half.
     split: AtomicBool,
+    /// `frame` gives a frame with no layer, as the manager's host does while nothing is shown.
+    empty: AtomicBool,
+    /// `frame` gives only the manager layer, blue over the right half.
+    manager_only: AtomicBool,
+    /// `frame` gives one mod layer whose mesh is empty: no geometry, no texture delta, no freed id.
+    blank_layer: AtomicBool,
     frames: AtomicU32,
     textures_lost: AtomicU32,
     skipped: AtomicU32,
     plain: AmmHostFrame,
     with_picture: AmmHostFrame,
     with_split: AmmHostFrame,
-    _frames: [TestFrame; 3],
-    _meshes: [TestMesh; 4],
+    no_layers: AmmHostFrame,
+    with_manager: AmmHostFrame,
+    with_blank: AmmHostFrame,
+    _frames: [TestFrame; 5],
+    _meshes: [TestMesh; 5],
 }
 
 // SAFETY: the frames and the meshes they point into are never changed after `new`; the rest are atomics
@@ -39,6 +48,15 @@ unsafe impl OverlayHost for TestHost {
         self.frames.fetch_add(1, Ordering::SeqCst);
         if self.no_frame.load(Ordering::SeqCst) {
             return None;
+        }
+        if self.empty.load(Ordering::SeqCst) {
+            return Some(&self.no_layers);
+        }
+        if self.blank_layer.load(Ordering::SeqCst) {
+            return Some(&self.with_blank);
+        }
+        if self.manager_only.load(Ordering::SeqCst) {
+            return Some(&self.with_manager);
         }
         if self.split.load(Ordering::SeqCst) {
             return Some(&self.with_split);
@@ -107,27 +125,50 @@ impl TestHost {
         let plain_frame = TestFrame::new(&[(Self::MOD_OWNER, &plain_mesh)]);
         let picture_frame = TestFrame::new(&[(Self::MOD_OWNER, &picture_mesh)]);
         let split_frame = TestFrame::new(&[(Self::MOD_OWNER, &left_mesh), (AmmHostLayer::MANAGER, &right_mesh)]);
+        let manager_frame = TestFrame::new(&[(AmmHostLayer::MANAGER, &right_mesh)]);
+        let blank_mesh = TestMesh::default();
+        let blank_frame = TestFrame::new(&[(Self::MOD_OWNER, &blank_mesh)]);
         let plain = plain_frame.frame();
         let with_picture = AmmHostFrame { game_picture: true, ..picture_frame.frame() };
         let with_split = split_frame.frame();
+        let with_manager = manager_frame.frame();
+        let with_blank = blank_frame.frame();
         Self {
             ready: AtomicBool::new(false),
             no_frame: AtomicBool::new(false),
             picture: AtomicBool::new(false),
             split: AtomicBool::new(false),
+            empty: AtomicBool::new(false),
+            manager_only: AtomicBool::new(false),
+            blank_layer: AtomicBool::new(false),
             frames: AtomicU32::new(0),
             textures_lost: AtomicU32::new(0),
             skipped: AtomicU32::new(0),
             plain,
             with_picture,
             with_split,
-            _frames: [plain_frame, picture_frame, split_frame],
-            _meshes: [plain_mesh, picture_mesh, left_mesh, right_mesh],
+            no_layers: AmmHostFrame::empty(),
+            with_manager,
+            with_blank,
+            _frames: [plain_frame, picture_frame, split_frame, manager_frame, blank_frame],
+            _meshes: [plain_mesh, picture_mesh, left_mesh, right_mesh, blank_mesh],
         }
     }
 
     pub fn set_split(&self, split: bool) {
         self.split.store(split, Ordering::SeqCst);
+    }
+
+    pub fn set_empty(&self, empty: bool) {
+        self.empty.store(empty, Ordering::SeqCst);
+    }
+
+    pub fn set_blank_layer(&self, blank: bool) {
+        self.blank_layer.store(blank, Ordering::SeqCst);
+    }
+
+    pub fn set_manager_only(&self, manager_only: bool) {
+        self.manager_only.store(manager_only, Ordering::SeqCst);
     }
 
     pub fn set_ready(&self, ready: bool) {

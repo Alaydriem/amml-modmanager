@@ -68,13 +68,26 @@ impl SurfaceRenderer {
         // SAFETY: OverlayHost promises the frame's pointers stay valid until its next frame, after this call
         let manager_from = unsafe { LayerRenderer::mod_layer_end(&frame) };
         // SAFETY: as above
-        let report = self.pass(surface, |pass| unsafe { pass.first(&frame, 0..manager_from) });
+        let idle = unsafe { LayerRenderer::range_is_idle(&frame, 0..manager_from) };
+        let report = if idle {
+            // no mod layer draws anything: the once-per-frame part needs no context or target, so the surface is not
+            // asked for and a loader that makes it on demand makes none
+            if let Some(renderer) = self.renderer.as_mut() {
+                // SAFETY: as above
+                unsafe { renderer.begin_frame(&frame) };
+            }
+            DrawReport::default()
+        } else {
+            // SAFETY: as above
+            self.pass(surface, |pass| unsafe { pass.first(&frame, 0..manager_from) })
+        };
         self.held = Some(HeldFrame { frame, epoch: surface.device_epoch(), manager_from });
         report
     }
 
     /// Draws the manager layers of the frame the last `draw_mods` of this present asked for. Nothing when that
-    /// call drew no frame or the surface is of another device epoch.
+    /// call drew no frame, the frame has no manager layer or the surface is of another device epoch. A frame with
+    /// no layer to draw never asks the surface for its context or target.
     pub fn draw_manager(&mut self, surface: &DrawSurface<'_>) -> DrawReport {
         let Some(held) = self.held.take() else {
             return DrawReport::default();
@@ -83,6 +96,10 @@ impl SurfaceRenderer {
             return DrawReport::default();
         }
         let layers = held.manager_from..held.frame.layer_count as usize;
+        // SAFETY: the host has not been asked for another frame since `draw_mods` took this one
+        if unsafe { LayerRenderer::range_is_idle(&held.frame, layers.clone()) } {
+            return DrawReport::default();
+        }
         // SAFETY: the host has not been asked for another frame since `draw_mods` took this one, so its pointers are
         // still valid (the OverlayHost contract)
         self.pass(surface, |pass| unsafe { pass.rest(&held.frame, layers) })

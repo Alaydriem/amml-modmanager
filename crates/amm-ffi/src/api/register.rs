@@ -33,10 +33,10 @@ pub unsafe extern "C" fn amm_register(
     }))
 }
 
-/// Core table `unregister`. It waits for a running callback of the mod, because the host lock is held around each.
+/// Core table `unregister`. It waits for a running Present, whose frame callbacks may still run.
 /// Any status other than `Ok` leaves the registration as it was.
 pub extern "C" fn amm_unregister(handle: AmmHandle) -> AmmStatus {
-    let result = Boundary::table(|| HostCell::global().with(|runtime| runtime.unregister(handle)));
+    let result = Boundary::table(|| HostCell::global().with_callbacks_held(|runtime| runtime.unregister(handle)));
     if let Err(status) = result {
         curia::debug!("unregister refused", { status: status as i32 });
     }

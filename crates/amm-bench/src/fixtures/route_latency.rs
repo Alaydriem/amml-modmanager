@@ -6,7 +6,7 @@ use amm_ffi::host::amm_host_key;
 
 use super::{BenchHost, ComposeMode, ComposeRig, LatencyReport};
 
-/// Measures how long `amm_host_key` takes to return while another thread composes frames under the host lock.
+/// Measures how long `amm_host_key` takes to return while another thread composes frames.
 pub struct RouteLatency;
 
 /// The two reports of one run: the key calls, and the composes that ran meanwhile.

@@ -56,6 +56,7 @@ impl RenderSizeControl {
     /// `WindowSize`, in `HookOrder::WRITE`: a real size message gives the game the forced size, so a resize of the
     /// window keeps it; a minimised window and a size the loader posted pass unchanged.
     pub fn on_window_size(&self, event: &mut WindowSize) {
+        self.cell.forget_client_size();
         if event.is_injected() {
             return;
         }

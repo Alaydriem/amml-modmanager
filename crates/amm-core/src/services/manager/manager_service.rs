@@ -582,6 +582,15 @@ impl ManagerService {
         self.saves.status(self.drafts.is_pending(), now_ms)
     }
 
+    /// True when one more failed frame callback of the mod in `index` reaches the failure limit and marks it failed.
+    pub fn at_last_frame_failure(&self, index: ModIndex) -> bool {
+        let limit = self.config.budgets.frame_failure_limit;
+        self.mods
+            .get(usize::from(index.0))
+            .and_then(Option::as_ref)
+            .is_some_and(|managed| managed.failures.saturating_add(1) >= limit)
+    }
+
     /// Counts one failed frame callback. At the failure limit in a row the mod is marked failed:
     /// its leases are released, its cursor request is removed, its layer is dropped and a toast is
     /// shown. It keeps its registration and settings. Returns true while the mod is failed.

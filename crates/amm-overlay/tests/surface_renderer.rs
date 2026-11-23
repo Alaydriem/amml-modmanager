@@ -204,3 +204,65 @@ fn a_host_without_a_frame_skips_it() {
     assert_eq!(rig.host.skipped(), 1);
     assert_eq!(target.pixel(32, 32), BLACK);
 }
+
+#[test]
+fn a_frame_with_no_layer_never_asks_for_the_surface() {
+    let target = WarpTarget::new();
+    let rig = SurfaceRig::on_demand(target.surface(1));
+    target.clear(BLACK);
+    rig.host.set_empty(true);
+
+    let report = drawn(rig.draw(SurfaceRig::waiting(target.surface(1))));
+    drawn(rig.draw_mods(SurfaceRig::waiting(target.surface(1))));
+    drawn(rig.draw_manager(SurfaceRig::waiting(target.surface(1))));
+
+    assert_eq!(report, DrawReport::default());
+    assert_eq!(rig.fake.prepare_surface_calls(), 0);
+    assert_eq!(rig.host.frames(), 2);
+    assert_eq!(rig.host.skipped(), 0);
+    assert!(rig.renderer().live_objects() > 0);
+    assert_eq!(target.pixel(32, 32), BLACK);
+}
+
+#[test]
+fn a_frame_with_a_layer_asks_for_the_surface_once_and_draws() {
+    let target = WarpTarget::new();
+    let rig = SurfaceRig::on_demand(target.surface(1));
+    target.clear(BLACK);
+
+    let report = drawn(rig.draw(SurfaceRig::waiting(target.surface(1))));
+
+    assert_eq!(report.drawn, 1);
+    assert_eq!(rig.fake.prepare_surface_calls(), 1);
+    assert_eq!(target.pixel(32, 32), TestHost::RED);
+}
+
+#[test]
+fn a_frame_with_only_a_manager_layer_asks_for_the_surface_in_the_manager_pass_only() {
+    let target = WarpTarget::new();
+    let rig = SurfaceRig::on_demand(target.surface(1));
+    rig.host.set_manager_only(true);
+
+    drawn(rig.draw_mods(SurfaceRig::waiting(target.surface(1))));
+    let after_mods = rig.fake.prepare_surface_calls();
+    let manager = drawn(rig.draw_manager(SurfaceRig::waiting(target.surface(1))));
+
+    assert_eq!(after_mods, 0);
+    assert_eq!(manager.drawn, 1);
+    assert_eq!(rig.fake.prepare_surface_calls(), 1);
+    assert_eq!(target.pixel(48, 32), TestHost::BLUE);
+}
+
+#[test]
+fn a_frame_whose_layers_draw_nothing_never_asks_for_the_surface() {
+    let target = WarpTarget::new();
+    let rig = SurfaceRig::on_demand(target.surface(1));
+    target.clear(BLACK);
+    rig.host.set_blank_layer(true);
+
+    let report = drawn(rig.draw(SurfaceRig::waiting(target.surface(1))));
+
+    assert_eq!(report, DrawReport::default());
+    assert_eq!(rig.fake.prepare_surface_calls(), 0);
+    assert_eq!(target.pixel(32, 32), BLACK);
+}
