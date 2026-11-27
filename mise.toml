@@ -17,7 +17,7 @@ run = [
   "cargo clippy --workspace --all-targets -- -D warnings",
   "cargo check -p amm-client --no-default-features --features test-support",
   "cargo clippy -p amm-client --no-default-features --features test-support -- -D warnings",
-  "cargo fmt --check -p amm-core -p amm-abi -p amm-store -p amm-ui -p amm-client -p amm-ffi -p amm-overlay -p amm-amml -p amm-bench -p amm-e2e",
+  "cargo fmt --check -p amm-core -p amm-abi -p amm-store -p amm-ui -p amm-client -p amm-ffi -p amm-overlay -p amm-amml -p amm-probe -p amm-bench -p amm-e2e",
 ]
 
 [tasks.test]
@@ -39,21 +39,42 @@ run = [
   "cbindgen --verify --config crates/amm-abi/cbindgen.toml --crate amm-abi --output include/alaydriem_mod_manager.h crates/amm-abi",
 ]
 
+[tasks.manifest]
+description = "Rewrites the uses block of crates/amm-amml/packaging/amml.hcl and crates/amm-probe/packaging/amml.hcl from the USES of each mod"
+dir = "{{config_root}}"
+run = [
+  "cargo run -q -p amm-amml --example write_manifest_modmanager",
+  "cargo run -q -p amm-probe --example write_manifest_managerprobe",
+]
+
 [tasks.package]
-description = "Builds dist/@amml/modmanager/ (amml_modmanager.dll, amml_modmanager.pdb, amml.hcl), the release artifact"
+description = "Builds dist/@amml/modmanager/ (amml_modmanager.dll, amml.hcl, icon.png), the release artifact"
 dir = "{{config_root}}"
 shell = "bash -c"
-# cargo names the cdylib amml_modmanager.dll, the module name mods find the manager by
+# cargo names the cdylib amml_modmanager.dll, the name the loader finds the mod DLL by
 run = '''
 set -e
 cargo build --release -p amm-amml
 rm -rf dist/@amml/modmanager
 mkdir -p dist/@amml/modmanager
 cp target/release/amml_modmanager.dll dist/@amml/modmanager/amml_modmanager.dll
-cp target/release/amml_modmanager.pdb dist/@amml/modmanager/amml_modmanager.pdb
 cp crates/amm-amml/packaging/amml.hcl dist/@amml/modmanager/amml.hcl
 cp crates/amm-amml/packaging/icon.png dist/@amml/modmanager/icon.png
 echo "built dist/@amml/modmanager"
+'''
+
+[tasks."package-probe"]
+description = "Builds dist/@amml/managerprobe/ (amml_managerprobe.dll, amml.hcl), the consumer test mod"
+dir = "{{config_root}}"
+shell = "bash -c"
+run = '''
+set -e
+cargo build --release -p amm-probe
+rm -rf dist/@amml/managerprobe
+mkdir -p dist/@amml/managerprobe
+cp target/release/amml_managerprobe.dll dist/@amml/managerprobe/amml_managerprobe.dll
+cp crates/amm-probe/packaging/amml.hcl dist/@amml/managerprobe/amml.hcl
+echo "built dist/@amml/managerprobe"
 '''
 
 [tasks.e2e]
@@ -123,20 +144,33 @@ run = [
 jq = "1.8.1"
 
 [tasks.install]
-description = "Runs package, then copies dist/@amml/modmanager into mods/amml/@amml/modmanager of an AMML instance under %LOCALAPPDATA%/amml/instances (--instance, default 1.26.60.05). The mod's config/ stays. Close the game first: a running game locks the DLL"
-depends = ["package"]
+description = "Checks the instance, runs package and package-probe, then copies dist/@amml/modmanager and dist/@amml/managerprobe into mods/amml/@amml/ of an AMML instance under %LOCALAPPDATA%/amml/instances (--instance, required). Refuses 1.26.63.01 and 1.26.63.01-P, and an instance whose amml/instance.hcl has no data_dir. Each mod's config/ stays. Close the game first: a running game locks the DLL"
 dir = "{{config_root}}"
 shell = "bash -c"
 usage = '''
-flag "--instance <name>" default="1.26.60.05" help="The instance folder under %LOCALAPPDATA%/amml/instances"
+flag "--instance <name>" help="The instance folder under %LOCALAPPDATA%/amml/instances (required)"
 '''
 run = '''
 set -e
 [ -n "$LOCALAPPDATA" ] || { echo "LOCALAPPDATA is not set; the instances live under %LOCALAPPDATA%/amml/instances"; exit 1; }
-instance="$LOCALAPPDATA/amml/instances/${usage_instance:-1.26.60.05}"
+name="${usage_instance:-}"
+[ -n "$name" ] || { echo "--instance <name> is required"; exit 1; }
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+instances="$(cd "$LOCALAPPDATA/amml/instances" 2> /dev/null && pwd -P)" || { echo "no folder $LOCALAPPDATA/amml/instances"; exit 1; }
+instance="$(cd "$instances/$name" 2> /dev/null && pwd -P)" || { echo "no instance folder $instances/$name"; exit 1; }
+[ "$(lower "$(dirname "$instance")")" = "$(lower "$instances")" ] || { echo "refusing $name: it resolves to $instance, which is not a folder of $instances"; exit 1; }
+case "$(lower "$(basename "$instance")")" in
+  1.26.63.01|1.26.63.01-p) echo "refusing $name: it resolves to $instance, a play instance; install into a test instance"; exit 1 ;;
+esac
 [ -f "$instance/Minecraft.Windows.exe" ] || { echo "no instance at $instance"; exit 1; }
-target="$instance/mods/amml/@amml/modmanager"
-mkdir -p "$target"
-cp -r dist/@amml/modmanager/. "$target/"
-echo "installed dist/@amml/modmanager -> $target"
+[ -f "$instance/amml/instance.hcl" ] || { echo "refusing $name: no amml/instance.hcl"; exit 1; }
+grep -Eq '^[[:space:]]*data_dir[[:space:]]*=' "$instance/amml/instance.hcl" || { echo "refusing $name: amml/instance.hcl has no data_dir"; exit 1; }
+mise run package
+mise run package-probe
+for mod in modmanager managerprobe; do
+  target="$instance/mods/amml/@amml/$mod"
+  mkdir -p "$target"
+  cp -r "dist/@amml/$mod/." "$target/"
+  echo "installed dist/@amml/$mod -> $target"
+done
 '''

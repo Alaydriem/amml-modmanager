@@ -218,6 +218,33 @@ fn a_click_on_the_menu_button_asks_to_open_the_panel() {
     assert_eq!(actions.to_vec(), vec![PanelAction::Open]);
 }
 
+// At 1.5 pixels per point the placed rects are in pixels, so a click on them is given in pixels too.
+fn scaled(time_secs: f64, events: &[UiEvent]) -> FrameInputData<'_> {
+    FrameInputData { pixels_per_point: 1.5, ..input_with(time_secs, events) }
+}
+
+#[test]
+fn a_click_on_the_placed_close_button_closes_the_panel() {
+    let mut mods = FourMods::new(MINIMAP);
+    let mut runtime = PanelRuntime::new(FontSource::BuiltIn, "");
+    let mut out = MeshBuffers::new();
+    runtime.run(&input(0.0), &PanelModel::new(&mods.manager, "1.4.1", 0), &mut out);
+    let closed = runtime.close_button_rect();
+    mods.manager.set_panel_open(true);
+    let model = PanelModel::new(&mods.manager, "1.4.1", 0);
+    runtime.run(&scaled(0.1, &[]), &model, &mut out);
+    let [min_x, min_y, max_x, max_y] = runtime.close_button_rect().expect("the close button is placed");
+    let at = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+
+    runtime.run(&scaled(0.2, &[pointer(UiEventKind::PointerMove, at, false)]), &model, &mut out);
+    runtime.run(&scaled(0.3, &[pointer(UiEventKind::PointerButton, at, true)]), &model, &mut out);
+    let actions = runtime.run(&scaled(0.4, &[pointer(UiEventKind::PointerButton, at, false)]), &model, &mut out);
+
+    assert_eq!(closed, None);
+    assert!(max_x <= 1920.0 && max_y <= 1080.0 && min_x > 1920.0 / 2.0, "close at {min_x},{min_y},{max_x},{max_y}");
+    assert_eq!(actions.to_vec(), vec![PanelAction::Close]);
+}
+
 #[test]
 fn textures_lost_reuploads_icons() {
     let mut mods = FourMods::new(MINIMAP);

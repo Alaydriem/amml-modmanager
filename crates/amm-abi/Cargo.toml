@@ -17,4 +17,6 @@ workspace = true
 
 [dependencies]
 amm-core.workspace = true
+# `Provided`, so a consumer requires the manager tables by type from the AMML registry
+amml-api.workspace = true
 bytemuck.workspace = true

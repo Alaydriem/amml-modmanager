@@ -2,13 +2,13 @@ use amm_abi::types::{AmmHandle, AmmStatus};
 
 use crate::services::{Boundary, HostCell};
 
-/// Table `locale`.
+/// Core table `locale`. A disabled manager gives 0.
 ///
 /// # Safety
 ///
 /// `out_buf` is null or holds `out_cap` writable bytes for the call.
 pub unsafe extern "C" fn amm_locale(handle: AmmHandle, out_buf: *mut u8, out_cap: usize) -> u32 {
-    let result = Boundary::guard(|| {
+    let result = Boundary::table(|| {
         let code = HostCell::global().with(|runtime| runtime.read_locale(handle))?;
         let len = u32::try_from(code.len()).map_err(|_| AmmStatus::InvalidArgument)?;
         if code.len() > out_cap {

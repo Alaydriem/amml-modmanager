@@ -1,15 +1,16 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use amm_abi::types::{AMM_ABI_MAJOR, AmmApi, AmmStatus};
-use amm_ffi::api::amm_api_for;
+use amm_abi::types::{AmmCoreTable, AmmKeybindsTable, AmmLayersTable, AmmLeasesTable, AmmSettingsTable, AmmStatus};
+use amm_ffi::api::ManagerTables;
 use amm_ffi::host::{amm_host_create, amm_host_destroy, amm_host_frame, amm_host_key};
 use amm_ffi::services::HostCell;
 use amm_ffi::services::host_runtime::HostRuntime;
 use amm_ffi::types::{AmmHostFrame, AmmHostFrameInput, AmmHostLayer, AmmHostRoute};
 use tempfile::TempDir;
 
-/// The process-global host, created in a temporary folder and destroyed on drop.
+/// The process-global host, created in a temporary folder laid out as an AMML mods folder (`mods/@amml/modmanager`
+/// for the manager, `mods/@test/mod-<n>` for each test mod) and destroyed on drop.
 pub struct TestHost {
     dir: TempDir,
     next_mod: AtomicU32,
@@ -58,20 +59,50 @@ impl TestHost {
         assert_eq!(result, Ok(()));
     }
 
-    pub fn api() -> &'static AmmApi {
-        let table = amm_api_for(AMM_ABI_MAJOR);
-        // SAFETY: a non-null table is the manager's static table
-        unsafe { table.as_ref() }.unwrap_or_else(|| panic!("table"))
+    pub fn core_table() -> &'static AmmCoreTable {
+        ManagerTables::CORE
     }
 
+    pub fn settings_table() -> &'static AmmSettingsTable {
+        ManagerTables::SETTINGS
+    }
+
+    pub fn keybinds_table() -> &'static AmmKeybindsTable {
+        ManagerTables::KEYBINDS
+    }
+
+    pub fn layers_table() -> &'static AmmLayersTable {
+        ManagerTables::LAYERS
+    }
+
+    pub fn leases_table() -> &'static AmmLeasesTable {
+        ManagerTables::LEASES
+    }
+
+    /// The AMML mods folder of this host.
+    pub fn mods_root(&self) -> PathBuf {
+        self.dir.path().join("mods")
+    }
+
+    /// The manager's own config folder.
     pub fn config_dir(&self) -> PathBuf {
-        self.dir.path().join("config")
+        self.mods_root().join("@amml").join("modmanager").join("config")
     }
 
-    /// A new absolute config folder for one test mod.
+    /// A new absolute config folder for one test mod, inside the mods folder.
     pub fn next_mod_dir(&self) -> PathBuf {
         let n = self.next_mod.fetch_add(1, Ordering::SeqCst);
-        self.dir.path().join("mods").join(format!("mod-{n}")).join("config")
+        self.mods_root().join("@test").join(format!("mod-{n}")).join("config")
+    }
+
+    /// A folder outside the mods folder of this host.
+    pub fn outside_dir(&self) -> PathBuf {
+        self.dir.path().join("elsewhere").join("config")
+    }
+
+    /// Closes the registry tables, as the manager's disable does.
+    pub fn disable_tables(&self) {
+        self.with_runtime(|runtime| runtime.disable_tables());
     }
 
     pub fn game_dir(&self) -> PathBuf {

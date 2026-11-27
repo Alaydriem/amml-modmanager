@@ -17,11 +17,6 @@ name = "zero_alloc"
 path = "tests/zero_alloc.rs"
 
 [[bench]]
-name = "capture_buffer"
-path = "benches/capture_buffer.rs"
-harness = false
-
-[[bench]]
 name = "client_frame"
 path = "benches/client_frame.rs"
 harness = false
@@ -57,9 +52,12 @@ amm-client.workspace = true
 amm-ui.workspace = true
 amml-ui.workspace = true
 png.workspace = true
+hcl-rs.workspace = true
 egui.workspace = true
 tempfile.workspace = true
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+# `FakeGame`, the loader the linked benches run their mods on
+amml-api = { workspace = true, features = ["test"] }
 
 [dev-dependencies]
 criterion.workspace = true
+

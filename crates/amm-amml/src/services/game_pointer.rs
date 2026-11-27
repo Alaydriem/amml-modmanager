@@ -1,26 +1,33 @@
-/// Converts the real cursor to the game's mouse position while a mod shows the game picture in a viewport: the
-/// game hit-tests with the position in its mouse feed, so a cursor inside the viewport is moved to the matching
-/// place of the full window. The host decides where; this converts the real cursor to back-buffer pixels, and the
-/// host's point is used as it is, in the pixels of the game's mouse feed.
-pub struct GamePointer;
+use amm_core::structs::render::RenderSize;
+use amm_ffi::services::HostCell;
+use amml_api::amml_abi::MouseInput;
+use amml_api::{Event, Window};
+
+/// Where the game's mouse feed puts the real cursor (`MouseInput`, `HookOrder::WRITE`): inside the game viewport of
+/// the `Overlay` holder (`set_game_viewport`), the point of the full window it stands for; while a render size is
+/// forced, every point in back-buffer pixels, because the game then sees its window at the back-buffer size. The
+/// cursor is the last window pointer position the host was given (buffer coordinates). Otherwise the event is left
+/// alone, as is an injected one. While no layer is drawn and no size is forced it reads neither the host lock nor the
+/// window; the client size is read once and kept until the next window size or window change.
+pub struct GamePointer {
+    cell: &'static HostCell,
+    window: Window,
+}
 
 impl GamePointer {
-    /// `cursor` and `client` are in client pixels, `buffer` is the back-buffer size. `host` takes the cursor in
-    /// back-buffer pixels and the client size, and maps them to its game point in client pixels, or `None` outside
-    /// the viewport.
-    pub fn map(
-        cursor: (i32, i32),
-        client: (i32, i32),
-        buffer: (u32, u32),
-        host: impl FnOnce(f32, f32, u32, u32) -> Option<(f32, f32)>,
-    ) -> Option<(i16, i16)> {
-        if client.0 <= 0 || client.1 <= 0 || buffer.0 == 0 || buffer.1 == 0 {
-            return None;
+    pub fn new(cell: &'static HostCell, window: Window) -> Self {
+        Self { cell, window }
+    }
+
+    pub fn on_mouse(&self, event: &mut MouseInput) {
+        if event.is_injected() {
+            return;
         }
-        let to_buffer_x = buffer.0 as f32 / client.0 as f32;
-        let to_buffer_y = buffer.1 as f32 / client.1 as f32;
-        let (game_x, game_y) =
-            host(cursor.0 as f32 * to_buffer_x, cursor.1 as f32 * to_buffer_y, client.0 as u32, client.1 as u32)?;
-        Some((game_x.round() as i16, game_y.round() as i16))
+        let window = &self.window;
+        let client = || window.client_size().map(|size| RenderSize::new(size.width, size.height));
+        if let Some((x, y)) = self.cell.game_point(client) {
+            event.x = x.round() as i32;
+            event.y = y.round() as i32;
+        }
     }
 }

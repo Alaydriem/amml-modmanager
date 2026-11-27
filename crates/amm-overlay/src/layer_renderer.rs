@@ -30,8 +30,8 @@ use crate::textures::TextureRegistry;
 const _: () = assert!(size_of::<AmmVertex>() == 20, "AmmVertex must match the input layout");
 
 /// Draws the layers of one `AmmHostFrame` with D3D11, bottom to top, in one or more ranges. Render thread only.
-/// Works on the game's own D3D11 device and on the D3D11On12 device of the D3D12 path; the caller keeps the
-/// context state it needs (`StateBackup`). Each draw command picks its pixel shader by `shader` and its sampler
+/// Works on the device of a `DrawSurface`, native or wrapped (D3D11On12). It sets every pipeline state it uses, all
+/// of them in the set the loader restores after the last `FramePresent` listener. Each draw command picks its pixel shader by `shader` and its sampler
 /// by `sampler`; a command with an unknown shader or sampler is skipped and logged once. Owns the layer textures
 /// and the game picture they may draw.
 pub struct LayerRenderer {
@@ -68,6 +68,8 @@ impl LayerRenderer {
     // A user texture is drawn as egui draws its own
     const PIXEL_CODE: [&'static [u8]; 3] = [Self::MAIN_CODE, Self::MAIN_CODE, Self::PICTURE_CODE];
     const SHADER_COUNT: usize = Self::PIXEL_CODE.len();
+    // the vertex shader, the input layout, the blend, rasterizer and depth states, and the two samplers
+    const FIXED_OBJECTS: usize = 7;
 
     const VERTEX_STRIDE: u32 = size_of::<AmmVertex>() as u32;
     const INDEX_STRIDE: u32 = size_of::<u32>() as u32;
@@ -169,6 +171,27 @@ impl LayerRenderer {
         self.textures.free_owners(frame.freed_owners);
     }
 
+    /// True when `draw` of `layers` would do nothing: no layer in the range has drawable geometry, a texture delta or a
+    /// freed texture id. Such a range needs no context or target.
+    ///
+    /// # Safety
+    ///
+    /// As for `draw`.
+    pub unsafe fn range_is_idle(frame: &AmmHostFrame, layers: Range<usize>) -> bool {
+        // SAFETY: the caller vouches for the frame's layer pointer
+        let Some(all) = (unsafe { MeshSlices::layers(frame) }) else {
+            return true;
+        };
+        let end = layers.end.min(all.len());
+        all.get(layers.start..end).is_none_or(|range| {
+            range.iter().all(|layer| {
+                // SAFETY: the caller vouches for the mesh pointers of every layer
+                let mesh = unsafe { MeshSlices::new(&layer.mesh) };
+                !mesh.usable() && mesh.deltas.is_empty() && mesh.freed.is_empty()
+            })
+        })
+    }
+
     /// The index of the first manager layer of `frame`, or its layer count when it has none. The layers before it
     /// are the mod layers.
     ///
@@ -192,11 +215,23 @@ impl LayerRenderer {
         self.textures.manager_closed();
     }
 
-    /// Drops every layer texture and the game picture, for a resize or a device loss. The caller then tells the
+    /// Drops every layer texture and the game picture, for a device loss. The caller then tells the
     /// manager its textures are lost.
     pub fn release_textures(&mut self) {
         self.textures.drop_all();
         self.picture.release();
+    }
+
+    /// The device objects held: the pipeline objects, the geometry buffers, each layer texture with its view, and
+    /// the game picture.
+    pub fn object_count(&self) -> usize {
+        Self::FIXED_OBJECTS
+            + Self::SHADER_COUNT
+            + usize::from(self.constants.is_some())
+            + usize::from(self.vertices.is_some())
+            + usize::from(self.indices.is_some())
+            + 2 * self.textures.len()
+            + self.picture.object_count()
     }
 
     pub fn textures(&self) -> &TextureRegistry {

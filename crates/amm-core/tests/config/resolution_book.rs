@@ -49,3 +49,15 @@ fn a_book_is_empty_until_a_resolution_of_either_kind_is_stored() {
     assert!(!with_exclusive.is_empty());
     assert!(!with_suspension.is_empty());
 }
+
+#[test]
+fn coexist_pairs_list_only_the_coexist_resolutions_of_one_capability() {
+    let book = ResolutionBook::new()
+        .with_suspension(PairKey::new(Capability::Input, "@b/y", "@a/x"), SuspensionResolution::Coexist)
+        .with_suspension(PairKey::new(Capability::Input, "@c/z", "@a/x"), SuspensionResolution::Suspend)
+        .with_suspension(PairKey::new(Capability::Hud, "@d/w", "@a/x"), SuspensionResolution::Coexist);
+
+    let pairs: Vec<(&str, &str)> = book.coexist_pairs(Capability::Input).collect();
+
+    assert_eq!(pairs, vec![("@a/x", "@b/y")]);
+}

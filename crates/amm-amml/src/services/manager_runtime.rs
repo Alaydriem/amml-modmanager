@@ -1,29 +1,39 @@
-use std::sync::OnceLock;
+use std::sync::atomic::AtomicU8;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use amml_sdk::{ModRuntime, SdkError};
-
-use super::{ManagerLifecycle, ManagerState, MouseGrab, MouseInput};
+use super::{ManagerClock, ManagerListeners, ManagerOverlayHost, ManagerState};
 use crate::paths::ManagerPaths;
-use crate::traits::GameCalls;
-use crate::types::DisableOutcome;
 
 static RUNTIME: OnceLock<ManagerRuntime> = OnceLock::new();
 
-/// The one runtime of this DLL, made at load. The detours have no context pointer, so they reach it through
-/// `get`.
+/// The one runtime of this DLL, made at load: the folders, the clock, the screen code the tick writes and the frames
+/// read, the overlay host (the renderer needs one for the process), and while the manager is enabled its shared
+/// state and its listeners. The mod callbacks have no context of their own, so they reach it through `get`.
 pub struct ManagerRuntime {
-    state: &'static ManagerState,
-    calls: &'static dyn GameCalls,
     paths: ManagerPaths,
-    lifecycle: ManagerLifecycle,
+    clock: ManagerClock,
+    menu: Arc<AtomicU8>,
+    overlay: ManagerOverlayHost,
+    state: Mutex<Option<Arc<ManagerState>>>,
+    listeners: Mutex<Option<ManagerListeners>>,
 }
 
 impl ManagerRuntime {
-    pub fn new(state: &'static ManagerState, calls: &'static dyn GameCalls, paths: ManagerPaths) -> Self {
-        Self { state, calls, paths, lifecycle: ManagerLifecycle::new(state) }
+    /// `menu` is the screen code `overlay` reads for its frames.
+    pub fn new(paths: ManagerPaths, clock: ManagerClock, menu: Arc<AtomicU8>, overlay: ManagerOverlayHost) -> Self {
+        Self { paths, clock, menu, overlay, state: Mutex::new(None), listeners: Mutex::new(None) }
     }
 
-    /// Keeps `runtime` for the detours. The first call wins; later calls return the first.
+    /// The screen code of the last tick, shared with the overlay host.
+    pub fn menu(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.menu)
+    }
+
+    pub fn overlay(&self) -> &ManagerOverlayHost {
+        &self.overlay
+    }
+
+    /// Keeps `runtime` for the process. The first call wins; later calls return the first.
     pub fn install(runtime: Self) -> &'static Self {
         RUNTIME.get_or_init(|| runtime)
     }
@@ -32,88 +42,43 @@ impl ManagerRuntime {
         RUNTIME.get()
     }
 
-    pub fn enable(&self) -> Result<(), SdkError> {
-        self.lifecycle.enable(self.calls, &self.paths)
+    pub fn paths(&self) -> &ManagerPaths {
+        &self.paths
     }
 
-    pub fn disable(&self) -> DisableOutcome {
-        self.lifecycle.disable(self.calls)
+    pub fn clock(&self) -> ManagerClock {
+        self.clock
     }
 
-    /// `ClientInstance::update` of `client` ran: the host tick, the fake key presses and mouse actions mods queued,
-    /// the held move intent for the move detour, the focus loss a full block kept from the game, the screen on top
-    /// for the next host frame, then the mouse grab and the HUD state the last host frame asked for.
-    pub fn tick(&self, client: usize) {
-        let state = self.state;
-        state.tick().tick(self.calls, client);
-        state.fake_keys().flush(self.calls);
-        state.fake_pointer().flush(self.calls, client);
-        state.fake_move().publish(self.calls, client);
-        self.replay_focus_loss();
-        state.menu().observe(self.calls, client);
-        state.grab().apply(self.calls, state.latch(), state.frame(), client);
-        state.hud().apply(self.calls, state.latch(), state.frame(), client);
+    /// Keeps the state and the listeners of an enable.
+    pub fn activate(&self, state: Arc<ManagerState>, listeners: ManagerListeners) {
+        *Self::lock(&self.state) = Some(state);
+        *Self::lock(&self.listeners) = Some(listeners);
     }
 
-    // A full block ended that had kept a focus loss from the game: while the window is still in the background, the
-    // game's window procedure sees that focus loss, so the game lets go of its cursor clip.
-    fn replay_focus_loss(&self) {
-        if self.calls.take_focus_loss_owed() && !self.calls.game_window_foreground() {
-            self.calls.replay_focus_loss();
-        }
+    /// Takes the state and the listeners of the last enable out, for a disable to drop them outside the locks.
+    pub fn deactivate(&self) -> (Option<Arc<ManagerState>>, Option<ManagerListeners>) {
+        let state = Self::lock(&self.state).take();
+        let listeners = Self::lock(&self.listeners).take();
+        (state, listeners)
     }
 
-    /// A key from the game's keyboard feed; true when the game must not see it.
-    pub fn key(&self, key: i32, down: bool) -> bool {
-        self.state.keys().route(self.calls, key, down)
+    /// The shared state while the manager is enabled.
+    pub fn state(&self) -> Option<Arc<ManagerState>> {
+        Self::lock(&self.state).clone()
     }
 
-    /// One event of the game's mouse feed on `device`; true when the game must not see it. `x` and `y` may be
-    /// moved. The device and the point the game gets are where fake mouse actions go.
-    pub fn mouse(&self, device: usize, action: u8, x: &mut i16, y: &mut i16, dx: i16, dy: i16) -> bool {
-        let cancel = MouseInput::feed(self.calls, action, x, y, dx, dy);
-        self.state.fake_pointer().note(device, *x, *y);
-        cancel
+    /// How many listeners the manager has now; 0 while it is not enabled.
+    pub fn listener_count(&self) -> usize {
+        Self::lock(&self.listeners).as_ref().map_or(0, ManagerListeners::len)
     }
 
-    /// The game's own `MinecraftGame::grabMouse` on `game`; true when it is skipped.
-    pub fn grab_called(&self, game: usize) -> bool {
-        self.state.grab().keep_game(game);
-        MouseGrab::blocks_grab(self.state.frame())
+    /// Whether the manager holds its panel input lease now.
+    pub fn panel_lease_held(&self) -> bool {
+        self.state().is_some_and(|state| state.panel_lease_held())
     }
 
-    /// The game filled the `RawMoveInputComponent` at `raw`: the held move intent is written into it.
-    pub fn move_input(&self, raw: usize) {
-        self.state.fake_move().write(raw);
-    }
-
-    /// The player's own look turn is dropped.
-    pub fn blocks_turn(&self) -> bool {
-        self.calls.blocks_player_turn()
-    }
-
-    /// The game's gamepad poll is dropped.
-    pub fn blocks_gamepad(&self) -> bool {
-        self.calls.blocks_gamepad()
-    }
-
-    /// A world finished loading.
-    pub fn world_loaded(&self) {
-        self.state.tick().world(self.calls, true);
-    }
-
-    /// The world is being left.
-    pub fn world_left(&self) {
-        self.state.tick().world(self.calls, false);
-    }
-
-    pub fn state(&self) -> &'static ManagerState {
-        self.state
-    }
-
-    /// A panic in a detour switched the manager off: every detour only calls the game's original, and the overlay
-    /// draws nothing, until the game restarts.
-    pub fn is_off(&self) -> bool {
-        ModRuntime::is_disabled()
+    fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        mutex.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

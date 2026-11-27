@@ -20,6 +20,10 @@ impl Capability {
         Capability::RenderSize,
     ];
 
+    /// The capabilities the manager leases. `Input` is claimed in a descriptor, but its lease is the loader's.
+    pub const MANAGER: [Capability; 5] =
+        [Capability::Camera, Capability::Hud, Capability::Overlay, Capability::WorldDraw, Capability::RenderSize];
+
     /// The name of the capability as a descriptor writes it, which `from_name` reads back.
     pub fn name(&self) -> &'static str {
         match self {

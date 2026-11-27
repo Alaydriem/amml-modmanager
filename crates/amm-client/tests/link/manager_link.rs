@@ -1,22 +1,26 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use amm_abi::types::{AmmEvent, AmmLogLevel, AmmRenderSize, AmmRenderSizeState, AmmStatus};
-use amm_client::link::ManagerLink;
+use amm_abi::types::AmmStatus;
+use amm_client::link::{LinkState, ManagerLink};
+use amm_client::test_support::{FakeConnection, FakeTable, SettingCall};
 use amm_core::errors::LinkError;
-use amm_core::services::icon::IconDecoder;
+use amm_core::structs::capture::ScreenshotLayers;
 use amm_core::structs::descriptor::Capability;
-use amm_core::structs::event::{KeybindPhase, ModEvent};
-use amm_core::structs::input::{MoveIntent, PointerButton, PointerOp};
-use amm_core::structs::mesh::GamePicture;
+use amm_core::structs::event::{KeybindPhase, ModEvent, ReleaseReason};
+use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::registry::ModIndex;
-use amm_core::structs::render::{RenderSize, RenderSizeState};
+use amml_api::amml_abi::{AmmlReleaseReason, InjectedInputReleased, ScreenshotTaken, ScreenshotWritten};
+use amml_api::testing::FakeGame;
+use amml_api::{InputBlocks, KeyCode, LeaseMode, LeaseRequest, ShotId, ShotLayers};
 use serde::Deserialize;
 
-use crate::support::{DropFlagHandler, FakeTable, IdleHandler};
+use crate::support::{DropFlagHandler, IdleHandler};
 
-const DESCRIPTOR: &str = "namespace = \"test\"\nname = \"alaydriem-refused\"\n";
+const INPUT_DESCRIPTOR: &str = "namespace = \"test\"\nname = \"alaydriem-input\"\n\
+display_name = \"Input\"\nversion = \"0.1.0\"\nauthor = \"Alaydriem\"\nconfig_path = \"config.hcl\"\n\
+claim \"Input\" {\n  mode   = \"Shared\"\n  reason = \"drives the player\"\n}\n";
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Card {
@@ -24,595 +28,455 @@ struct Card {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
-struct Keys {
-    take_camera: String,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
 struct TestConfig {
     card: Card,
-    keys: Keys,
+}
+
+// A started link on `FakeTable::game()` with the tables provided but no `ProviderReady` raised yet.
+fn waiting() -> FakeConnection {
+    let game = FakeTable::game();
+    let ctx = FakeTable::ctx_of(&game, FakeTable::DESCRIPTOR);
+    let link = match ManagerLink::start_without_frame(&ctx, FakeTable::DESCRIPTOR) {
+        Ok(link) => link,
+        Err(error) => panic!("start failed: {error}"),
+    };
+    if let Err(error) = FakeTable::provide(&ctx) {
+        panic!("provide failed: {error}");
+    }
+    FakeConnection { link, game }
+}
+
+fn release_of(lease: u64, reason: AmmlReleaseReason) -> InjectedInputReleased {
+    let header = FakeGame::header::<InjectedInputReleased>();
+    InjectedInputReleased { header, lease, reason, input: InjectedInputReleased::ALL, code: 0, _reserved: 0 }
+}
+
+fn taken(id: u64, ok: u8) -> ScreenshotTaken {
+    ScreenshotTaken { header: FakeGame::header::<ScreenshotTaken>(), id, ok, _reserved: [0; 7] }
 }
 
 #[test]
-fn dropping_the_link_unregisters_once() {
-    let link = FakeTable::link(IdleHandler);
-    let handle = FakeTable::with(|state| state.handle);
-    assert!(FakeTable::with(|state| state.unregistered.is_empty()));
+fn start_waits_until_the_core_provider_is_ready() {
+    let connection = waiting();
 
-    drop(link);
+    let state = connection.link.state();
+    let set = connection.link.set_setting("overlay.radius", &hcl::Value::from(24));
 
-    assert_eq!(FakeTable::with(|state| state.unregistered.clone()), vec![handle]);
+    assert_eq!(state, LinkState::Waiting);
+    assert_eq!(set, Err(LinkError::NotConnected));
+    assert!(FakeTable::calls().is_empty(), "no table is called before ProviderReady");
+    FakeTable::ready(&connection.game);
+    assert_eq!(connection.link.state(), LinkState::Connected);
 }
 
 #[test]
-fn register_gives_the_descriptor_text_and_a_refusal_is_the_status() {
-    FakeTable::with(|state| state.register_status = AmmStatus::DuplicateId);
+fn connect_registers_with_the_mods_config_dir() {
+    let connection = FakeTable::link_without_frame();
 
-    let result = ManagerLink::new(FakeTable::table(), DESCRIPTOR, Path::new(FakeTable::CONFIG_DIR), IdleHandler);
-
-    assert_eq!(result.err(), Some(LinkError::Status(AmmStatus::DuplicateId as i32)));
-    assert_eq!(FakeTable::with(|state| state.descriptor.clone()), Some(DESCRIPTOR.to_owned()));
+    assert_eq!(connection.link.state(), LinkState::Connected);
     assert_eq!(FakeTable::with(|state| state.config_dir.clone()), Some(FakeTable::CONFIG_DIR.to_owned()));
-    assert!(FakeTable::with(|state| state.unregistered.is_empty()));
+    assert_eq!(FakeTable::with(|state| state.descriptor.clone()), Some(FakeTable::DESCRIPTOR.to_owned()));
+    let registers = FakeTable::calls().iter().filter(|call| **call == "register").count();
+    assert_eq!(registers, 1, "one register for the five ProviderReady events");
 }
 
 #[test]
-fn events_come_back_as_core_events_in_order() {
-    let mut link = FakeTable::link(IdleHandler);
-    let sent = vec![
-        ModEvent::Granted(Capability::Camera),
-        ModEvent::Keybind { action: 2, phase: KeybindPhase::Pressed },
-        ModEvent::Revoked { capability: Capability::Input, by: ModIndex(4) },
-        ModEvent::Disabled,
-    ];
-    FakeTable::with(|state| state.events.extend(sent.iter().map(|event| AmmEvent::from(*event))));
+fn no_core_provider_gives_no_manager() {
+    let game = FakeTable::game();
+    let link =
+        match ManagerLink::start_without_frame(&FakeTable::ctx_of(&game, FakeTable::DESCRIPTOR), FakeTable::DESCRIPTOR)
+        {
+            Ok(link) => link,
+            Err(error) => panic!("start failed: {error}"),
+        };
 
-    let received: Vec<ModEvent> = link.events().collect();
+    FakeTable::mods_loaded(&game);
+    FakeTable::mods_loaded(&game);
 
-    assert_eq!(received, sent);
-    assert_eq!(link.events().count(), 0);
-}
-
-#[test]
-fn config_parses_the_hcl_document_into_the_mods_type() {
-    let link = FakeTable::link(IdleHandler);
-    FakeTable::set_config(
-        "# kept by the manager\ncard {\n  scale = 0.75\n}\nkeys {\n  take_camera = \"Ctrl+Shift+C\"\n}\n",
-    );
-
-    let config: TestConfig = match link.config() {
-        Ok(config) => config,
-        Err(error) => panic!("config did not parse: {error}"),
-    };
-
-    assert_eq!(
-        config,
-        TestConfig { card: Card { scale: 0.75 }, keys: Keys { take_camera: "Ctrl+Shift+C".to_owned() } }
-    );
-}
-
-#[test]
-fn config_that_does_not_fit_the_mods_type_is_an_error() {
-    let link = FakeTable::link(IdleHandler);
-    FakeTable::set_config("card {\n  scale = \"large\"\n}\n");
-
-    let result = link.config::<TestConfig>();
-
-    assert!(matches!(result, Err(LinkError::Json { .. })));
-}
-
-#[test]
-fn tracing_events_reach_the_table_through_the_bridge() {
-    let link = FakeTable::link(IdleHandler);
-
-    tracing::info!(chunk = 12, "from a tracing library");
-
-    let messages: Vec<String> = FakeTable::with(|state| state.logs.iter().map(|call| call.message.clone()).collect());
-    assert_eq!(messages, vec!["from a tracing library".to_owned()]);
+    assert_eq!(link.state(), LinkState::Waiting);
+    assert_eq!(link.set_setting("a", &hcl::Value::from(1)), Err(LinkError::NoManager));
+    let lines: Vec<String> = game.logs().into_iter().filter(|line| line.contains("manager not found")).collect();
+    assert_eq!(lines, vec!["warn manager not found".to_owned()]);
     drop(link);
 }
 
 #[test]
-fn logging_after_the_link_is_dropped_does_not_reach_the_table() {
-    let link = FakeTable::link(IdleHandler);
-    curia::info!("while linked", { n: 1 });
-    drop(link);
+fn calls_after_provider_gone_give_gone() {
+    let mut connection = FakeTable::link_without_frame_with(INPUT_DESCRIPTOR);
+    let handle = FakeTable::with(|state| state.handle);
 
-    curia::info!("after unlink", { n: 2 });
+    FakeTable::gone(&connection.game);
+    let calls_at_gone = FakeTable::calls();
+    let set = connection.link.set_setting("overlay.radius", &hcl::Value::from(24));
+    let camera = connection.link.acquire(Capability::Camera);
+    let input = connection.link.acquire(Capability::Input);
+    let open = connection.link.panel_open();
 
-    let messages: Vec<String> = FakeTable::with(|state| state.logs.iter().map(|call| call.message.clone()).collect());
-    assert_eq!(messages, vec!["while linked".to_owned()]);
+    assert_eq!(connection.link.state(), LinkState::Gone);
+    assert_eq!(set, Err(LinkError::Gone));
+    assert_eq!(camera, Err(LinkError::Gone));
+    assert_eq!(input, Err(LinkError::Gone));
+    assert!(!open);
+    assert_eq!(FakeTable::calls(), calls_at_gone, "no table call after ProviderGone");
+    assert_eq!(FakeTable::with(|state| state.unregistered.clone()), vec![handle], "unregistered once, at the gone");
+    assert_eq!(connection.link.events().collect::<Vec<_>>(), vec![ModEvent::ManagerGone]);
+    drop(connection);
+    assert_eq!(FakeTable::with(|state| state.unregistered.len()), 1, "a drop after the gone does not unregister");
 }
 
 #[test]
-fn the_link_sink_logs_through_the_links_handle_until_the_link_drops() {
-    let link = FakeTable::link(IdleHandler);
-    let sink = link.sink();
-    let event = curia::LogEvent {
-        level: curia::Level::Info,
-        target: "demo".to_owned(),
-        message: "hello".to_owned(),
-        fields: curia::Fields::new(),
-        timestamp: chrono::Utc::now(),
-        file: None,
-        line: None,
-    };
+fn provider_gone_releases_the_input_lease_and_its_keys() {
+    let connection = FakeTable::link_without_frame_with(INPUT_DESCRIPTOR);
+    assert_eq!(connection.link.acquire(Capability::Input), Ok(AcquireOutcome::Granted));
+    assert_eq!(connection.link.send_key(KeyCode::W, true), Ok(()));
+    connection.game.frame();
 
-    curia::Sink::emit(&sink, &event);
-    drop(link);
-    curia::Sink::emit(&sink, &event);
+    FakeTable::gone(&connection.game);
+    connection.game.frame();
 
-    assert_eq!(
-        FakeTable::with(|state| state.logs.iter().map(|call| call.message.clone()).collect::<Vec<_>>()),
-        vec!["hello"]
-    );
+    assert_eq!(connection.game.injected(), vec!["key 0x57 down".to_owned(), "key 0x57 up".to_owned()]);
+    assert_eq!(connection.link.input_lease_id(), None);
 }
 
 #[test]
-fn an_unregister_that_returns_ok_frees_the_frame_state() {
+fn provider_gone_frees_the_frame_state_after_an_ok_unregister() {
     let dropped = Arc::new(AtomicBool::new(false));
-    let link = FakeTable::link(DropFlagHandler::new(Arc::clone(&dropped)));
+    let connection = FakeTable::link(DropFlagHandler::new(Arc::clone(&dropped)));
 
-    drop(link);
+    FakeTable::gone(&connection.game);
 
-    assert!(dropped.load(Ordering::SeqCst));
+    assert!(dropped.load(Ordering::SeqCst), "freed at the gone, before the manager is disabled");
+    drop(connection);
 }
 
 #[test]
 fn a_refused_unregister_keeps_the_frame_state_and_logs_an_error() {
     let dropped = Arc::new(AtomicBool::new(false));
-    let link = FakeTable::link(DropFlagHandler::new(Arc::clone(&dropped)));
+    let FakeConnection { link, game } = FakeTable::link(DropFlagHandler::new(Arc::clone(&dropped)));
     FakeTable::with(|state| state.unregister_status = AmmStatus::NotPermitted);
 
     drop(link);
 
     assert!(!dropped.load(Ordering::SeqCst));
-    let errors =
-        FakeTable::with(|state| state.logs.iter().filter(|call| call.level == AmmLogLevel::Error as u8).count());
+    let errors = game.logs().into_iter().filter(|line| line.starts_with("error unregister refused")).count();
     assert_eq!(errors, 1);
 }
 
 #[test]
-fn holder_copies_the_id_and_none_when_no_mod_holds_it() {
-    let link = FakeTable::link(IdleHandler);
-    let nobody = link.holder(Capability::Camera);
-    FakeTable::with(|state| state.holder_id = Some("alaydriem-freecam"));
-
-    let holder = link.holder(Capability::Camera);
-
-    assert_eq!(nobody, None);
-    assert_eq!(holder.as_deref(), Some("alaydriem-freecam"));
-}
-
-#[test]
-fn holder_reads_an_id_longer_than_its_first_buffer() {
-    const LONG: &str = "a-mod-id-that-is-longer-than-sixty-four-bytes-so-the-first-buffer-is-too-small";
-    let link = FakeTable::link(IdleHandler);
-    FakeTable::with(|state| state.holder_id = Some(LONG));
-
-    let holder = link.holder(Capability::Overlay);
-
-    assert_eq!(holder.as_deref(), Some(LONG));
-}
-
-#[test]
-fn link_reads_the_locale() {
-    let link = FakeTable::link(IdleHandler);
-    let english = link.locale();
-    FakeTable::with(|state| state.locale = "en_XA");
-
-    let pseudo = link.locale();
-
-    assert_eq!(english.as_deref(), Some(""));
-    assert_eq!(pseudo.as_deref(), Some("en_XA"));
-}
-
-#[test]
-fn the_link_gives_back_the_localizer_it_was_set() {
-    let link = FakeTable::link(IdleHandler);
-    let set = Arc::new(amml_i18n::localize::Localizer::english());
-
-    link.set_localizer(Arc::clone(&set));
-
-    assert!(Arc::ptr_eq(&link.localizer(), &set));
-}
-
-#[test]
-fn a_link_without_a_frame_registers_with_no_callbacks_and_unregisters_on_drop() {
-    let link = FakeTable::link_without_frame();
+fn dropping_the_link_unregisters_once_and_frees_the_frame_state() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let connection = FakeTable::link(DropFlagHandler::new(Arc::clone(&dropped)));
     let handle = FakeTable::with(|state| state.handle);
-    let callbacks = FakeTable::with(|state| state.callbacks);
+    assert!(!dropped.load(Ordering::SeqCst));
 
-    drop(link);
+    drop(connection);
 
-    let Some(callbacks) = callbacks else { panic!("nothing registered") };
-    assert!(callbacks.frame.is_none());
-    assert!(callbacks.textures_lost.is_none());
-    assert!(callbacks.user.is_null());
-    assert!(FakeTable::with(|state| state.registered_without_frame()));
-    assert_eq!(FakeTable::with(|state| state.descriptor.clone()), Some(FakeTable::DESCRIPTOR.to_owned()));
     assert_eq!(FakeTable::with(|state| state.unregistered.clone()), vec![handle]);
+    assert!(dropped.load(Ordering::SeqCst));
 }
 
 #[test]
-fn a_link_without_a_frame_gets_keybind_and_settings_events() {
-    let mut link = FakeTable::link_without_frame();
+fn a_link_with_a_frame_gives_its_callbacks_at_connect_and_one_without_gives_none() {
+    let with_frame = FakeTable::link(IdleHandler);
+    let callbacks = FakeTable::with(|state| state.callbacks);
+    let ran = FakeTable::run_frame();
+    drop(with_frame);
+    FakeTable::with(|state| state.calls.clear());
+
+    let without = FakeTable::link_without_frame();
+
+    let Some(callbacks) = callbacks else { panic!("no callbacks were set") };
+    assert!(callbacks.frame.is_some() && callbacks.textures_lost.is_some());
+    assert_eq!(ran, AmmStatus::Ok as i32);
+    assert!(!FakeTable::calls().contains(&"set_callbacks"));
+    drop(without);
+}
+
+#[test]
+fn a_refused_registration_is_kept_as_the_fault() {
+    FakeTable::with(|state| state.register_status = AmmStatus::DuplicateId);
+
+    let connection = FakeTable::link_without_frame();
+
+    assert_eq!(connection.link.state(), LinkState::Waiting);
+    assert_eq!(connection.link.config::<TestConfig>(), Err(LinkError::Status(AmmStatus::DuplicateId as i32)));
+    drop(connection);
+    assert!(FakeTable::with(|state| state.unregistered.is_empty()));
+}
+
+#[test]
+fn injected_release_becomes_fake_keys_released() {
+    let mut connection = FakeTable::link_without_frame_with(INPUT_DESCRIPTOR);
+    assert_eq!(connection.link.acquire(Capability::Input), Ok(AcquireOutcome::Granted));
+    let Some(lease) = connection.link.input_lease_id() else { panic!("no lease") };
+
+    let _ = connection.game.raise(&mut release_of(lease, AmmlReleaseReason::FOCUS_LOST));
+    let _ = connection.game.raise(&mut release_of(lease ^ 1, AmmlReleaseReason::FOCUS_LOST));
+
+    assert_eq!(
+        connection.link.events().collect::<Vec<_>>(),
+        vec![ModEvent::FakeKeysReleased { reason: ReleaseReason::FocusLost }],
+        "a release of another lease is not passed on"
+    );
+}
+
+#[test]
+fn a_preempting_lease_suspends_the_link_lease_and_releases_its_keys() {
+    let mut connection = FakeTable::link_without_frame_with(INPUT_DESCRIPTOR);
+    assert_eq!(connection.link.acquire(Capability::Input), Ok(AcquireOutcome::Granted));
+    assert_eq!(connection.link.send_key(KeyCode::W, true), Ok(()));
+    connection.game.frame();
+    let panel = LeaseRequest { mode: LeaseMode::Exclusive, blocks: InputBlocks::FULL, passthrough: &[], preempt: true };
+
+    let preempt = match connection.game.ctx().input().acquire(panel) {
+        Ok(lease) => lease,
+        Err(error) => panic!("preempt refused: {error}"),
+    };
+    connection.game.frame();
+    let suspended: Vec<ModEvent> = connection.link.events().collect();
+    let refused = connection.link.send_key(KeyCode::A, true);
+    drop(preempt);
+    connection.game.frame();
+    let resumed: Vec<ModEvent> = connection.link.events().collect();
+
+    assert!(suspended.contains(&ModEvent::InputLeaseSuspended), "{suspended:?}");
+    assert!(suspended.contains(&ModEvent::FakeKeysReleased { reason: ReleaseReason::Suspended }), "{suspended:?}");
+    assert!(matches!(refused, Err(LinkError::Api(_))), "{refused:?}");
+    assert!(resumed.contains(&ModEvent::InputLeaseResumed), "{resumed:?}");
+    assert_eq!(connection.game.injected(), vec!["key 0x57 down".to_owned(), "key 0x57 up".to_owned()]);
+    assert_eq!(connection.link.acquire(Capability::Input), Ok(AcquireOutcome::Granted));
+}
+
+#[test]
+fn events_merge_manager_and_loader_events_in_arrival_order() {
+    let mut connection = FakeTable::link_without_frame();
+    FakeTable::push_event(ModEvent::Keybind { action: 1, phase: KeybindPhase::Pressed });
+    let _ = connection.game.raise(&mut taken(4, 1));
+    FakeTable::push_event(ModEvent::Keybind { action: 1, phase: KeybindPhase::Released });
+    let mut written =
+        ScreenshotWritten { header: FakeGame::header::<ScreenshotWritten>(), id: 4, ok: 0, _reserved: [0; 7] };
+    let _ = connection.game.raise(&mut written);
+
+    let events: Vec<ModEvent> = connection.link.events().collect();
+
+    assert_eq!(
+        events,
+        vec![
+            ModEvent::Keybind { action: 1, phase: KeybindPhase::Pressed },
+            ModEvent::ScreenshotTaken { id: ShotId(4), ok: true },
+            ModEvent::Keybind { action: 1, phase: KeybindPhase::Released },
+            ModEvent::ScreenshotWritten { id: ShotId(4), ok: false },
+        ]
+    );
+    assert_eq!(connection.link.events().count(), 0);
+}
+
+#[test]
+fn lease_events_of_the_manager_reach_the_link_in_order() {
+    let mut connection = FakeTable::link_without_frame();
     let sent = [
-        ModEvent::Enabled,
-        ModEvent::Keybind { action: 1, phase: KeybindPhase::Pressed },
-        ModEvent::SettingsChanged { paths: 2 },
-        ModEvent::Keybind { action: 1, phase: KeybindPhase::Released },
+        ModEvent::Granted(Capability::WorldDraw),
+        ModEvent::Suspended { capability: Capability::WorldDraw, by: ModIndex(5) },
+        ModEvent::Resumed(Capability::WorldDraw),
+        ModEvent::Revoked { capability: Capability::WorldDraw, by: ModIndex(6) },
+        ModEvent::Disabled,
     ];
     sent.iter().for_each(|event| FakeTable::push_event(*event));
 
-    let received: Vec<ModEvent> = link.events().collect();
+    let received: Vec<ModEvent> = connection.link.events().collect();
 
     assert_eq!(received, sent);
 }
 
 #[test]
-fn a_link_without_a_frame_forwards_its_logs_until_it_drops() {
-    let link = FakeTable::link_without_frame();
-    curia::info!("while linked", { n: 1 });
-    drop(link);
+fn screenshot_calls_the_overlay() {
+    let mut connection = FakeTable::link_without_frame();
+    let first = PathBuf::from("C:\\shots\\a.png");
+    let second = PathBuf::from("C:\\shots\\b.png");
 
-    curia::info!("after unlink", { n: 2 });
+    let with_layers = connection.link.request_screenshot_with(&first, ScreenshotLayers::WithModLayers);
+    let game_only = connection.link.request_screenshot_with(&second, ScreenshotLayers::GameOnly);
 
-    let messages: Vec<String> = FakeTable::with(|state| state.logs.iter().map(|call| call.message.clone()).collect());
-    assert_eq!(messages, vec!["while linked".to_owned()]);
+    let Ok(id) = with_layers else { panic!("screenshot refused: {with_layers:?}") };
+    assert!(game_only.is_ok());
+    assert_eq!(connection.game.screenshots(), vec![(first, ShotLayers::WithOverlays), (second, ShotLayers::GameOnly)]);
+    let _ = connection.game.raise(&mut taken(id.0, 1));
+    assert_eq!(connection.link.events().collect::<Vec<_>>(), vec![ModEvent::ScreenshotTaken { id, ok: true }]);
 }
 
 #[test]
-fn a_link_without_a_frame_and_a_refused_unregister_logs_one_error() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.unregister_status = AmmStatus::NotPermitted);
+fn acquire_answers_the_manager_outcome_per_capability() {
+    let connection = FakeTable::link_without_frame();
+    FakeTable::set_acquire_outcome(Capability::WorldDraw, AcquireOutcome::Denied { holder: ModIndex(2) });
+    FakeTable::set_acquire_outcome(Capability::Camera, AcquireOutcome::Preempted);
 
-    drop(link);
+    let world_draw = connection.link.acquire(Capability::WorldDraw);
+    let camera = connection.link.acquire(Capability::Camera);
+    let hud = connection.link.acquire(Capability::Hud);
+    connection.link.release(Capability::Hud);
 
-    let errors =
-        FakeTable::with(|state| state.logs.iter().filter(|call| call.level == AmmLogLevel::Error as u8).count());
-    assert_eq!(errors, 1);
+    assert_eq!(world_draw, Ok(AcquireOutcome::Denied { holder: ModIndex(2) }));
+    assert_eq!(camera, Ok(AcquireOutcome::Preempted));
+    assert_eq!(hud, Ok(AcquireOutcome::Granted));
+    assert_eq!(
+        FakeTable::with(|state| state.acquired.clone()),
+        vec![Capability::WorldDraw, Capability::Camera, Capability::Hud]
+    );
+    assert_eq!(FakeTable::with(|state| state.released.clone()), vec![Capability::Hud]);
 }
 
 #[test]
-fn a_refused_register_without_a_frame_is_the_status() {
-    FakeTable::with(|state| state.register_status = AmmStatus::DuplicateId);
+fn input_without_an_input_claim_is_not_permitted_and_no_manager_call() {
+    let connection = FakeTable::link_without_frame();
+    FakeTable::with(|state| state.calls.clear());
 
-    let result = ManagerLink::without_frame(FakeTable::table(), DESCRIPTOR, Path::new(FakeTable::CONFIG_DIR));
+    let input = connection.link.acquire(Capability::Input);
+    let held = connection.link.held_by_other(Capability::Input);
+    let holder = connection.link.holder(Capability::Input);
 
-    assert_eq!(result.err(), Some(LinkError::Status(AmmStatus::DuplicateId as i32)));
-    assert!(FakeTable::with(|state| state.unregistered.is_empty()));
+    assert_eq!(input, Err(LinkError::Status(AmmStatus::NotPermitted as i32)));
+    assert!(!held);
+    assert_eq!(holder, None);
+    assert!(FakeTable::calls().is_empty(), "{:?}", FakeTable::calls());
 }
 
 #[test]
-fn a_link_made_with_a_frame_handler_frees_its_frame_state_on_drop() {
+fn config_parses_the_hcl_document_into_the_mods_type_and_set_setting_sends_hcl() {
+    let connection = FakeTable::link_without_frame();
+    FakeTable::set_config("# kept by the manager\ncard {\n  scale = 0.75\n}\n");
+
+    let config = connection.link.config::<TestConfig>();
+    let set = connection.link.set_setting("card.scale", &hcl::Value::from(24));
+
+    assert_eq!(config, Ok(TestConfig { card: Card { scale: 0.75 } }));
+    assert_eq!(set, Ok(()));
+    assert_eq!(
+        FakeTable::with(|state| state.settings.clone()),
+        vec![SettingCall { path: "card.scale".to_owned(), expression: "24".to_owned() }]
+    );
+}
+
+#[test]
+fn holder_reads_an_id_longer_than_its_first_buffer_and_locale_reads_the_code() {
+    const LONG: &str = "a-mod-id-that-is-longer-than-sixty-four-bytes-so-the-first-buffer-is-too-small";
+    let connection = FakeTable::link_without_frame();
+    let nobody = connection.link.holder(Capability::Camera);
+    FakeTable::with(|state| {
+        state.holder_id = Some(LONG);
+        state.locale = "en_XA";
+    });
+
+    assert_eq!(nobody, None);
+    assert_eq!(connection.link.holder(Capability::Overlay).as_deref(), Some(LONG));
+    assert_eq!(connection.link.locale().as_deref(), Some("en_XA"));
+}
+
+#[test]
+fn the_link_gives_back_the_localizer_it_was_set() {
+    let connection = FakeTable::link(IdleHandler);
+    let set = Arc::new(amml_i18n::localize::Localizer::english());
+
+    connection.link.set_localizer(Arc::clone(&set));
+
+    assert!(Arc::ptr_eq(&connection.link.localizer(), &set));
+}
+
+#[test]
+fn a_descriptor_that_does_not_parse_is_json_and_frees_the_frame_state() {
+    let game = FakeTable::game();
     let dropped = Arc::new(AtomicBool::new(false));
-    let link = FakeTable::link(DropFlagHandler::new(Arc::clone(&dropped)));
-    assert!(!dropped.load(Ordering::SeqCst));
-    assert!(FakeTable::with(|state| !state.registered_without_frame()));
 
-    drop(link);
+    let result = ManagerLink::start(&game.ctx(), "claim {", Some(DropFlagHandler::new(Arc::clone(&dropped))));
 
+    assert!(matches!(result, Err(LinkError::Json { .. })));
     assert!(dropped.load(Ordering::SeqCst));
 }
 
 #[test]
-fn set_icon_passes_the_bytes() {
-    let link = FakeTable::link_without_frame();
+fn tracing_events_reach_the_mod_log() {
+    let connection = FakeTable::link_without_frame();
 
-    assert_eq!(link.set_icon(&[1, 2, 3, 4, 5]), Ok(()));
+    tracing::info!(chunk = 12, "from a tracing library");
 
-    assert_eq!(FakeTable::with(|state| state.icon_calls.clone()), vec![5]);
+    assert!(connection.game.logs().contains(&"info from a tracing library chunk=12".to_owned()));
 }
 
 #[test]
-fn set_icon_maps_status() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.icon_status = AmmStatus::InvalidArgument);
+fn the_crate_has_no_module_lookup() {
+    let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    let mut hits = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { panic!("cannot read {}", dir.display()) };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { panic!("cannot read {}", path.display()) };
+            for word in ["GetModuleHandle", "GetProcAddress", "amml_sdk", "amm_get_api"] {
+                if text.contains(word) {
+                    hits.push(format!("{} {word}", path.display()));
+                }
+            }
+        }
+    }
 
-    assert_eq!(link.set_icon(&[1, 2, 3]), Err(LinkError::Status(AmmStatus::InvalidArgument as i32)));
+    assert_eq!(hits, Vec::<String>::new());
 }
 
 #[test]
-fn old_manager_gives_unsupported() {
-    let mut api = FakeTable::api();
-    api.set_icon = None;
-    let link = FakeTable::link_without_frame_on(api);
+fn a_real_up_that_ends_a_held_key_drops_only_that_hold_and_a_new_down_presses_again() {
+    let mut connection = FakeTable::link_without_frame_with(INPUT_DESCRIPTOR);
+    assert_eq!(connection.link.acquire(Capability::Input), Ok(AcquireOutcome::Granted));
+    assert_eq!(connection.link.send_key(KeyCode::LSHIFT, true), Ok(()));
+    assert_eq!(connection.link.send_key(KeyCode::W, true), Ok(()));
+    connection.game.frame();
 
-    assert_eq!(link.set_icon(&[1, 2, 3]), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-    assert!(FakeTable::with(|state| state.icon_calls.is_empty()));
-}
-
-#[test]
-fn set_icon_file_reads_and_sends() {
-    let link = FakeTable::link_without_frame();
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("icon.png");
-    std::fs::write(&path, vec![7u8; 321]).expect("write icon");
-
-    assert_eq!(link.set_icon_file(&path), Ok(()));
-
-    assert_eq!(FakeTable::with(|state| state.icon_calls.clone()), vec![321]);
-}
-
-#[test]
-fn oversized_file_is_refused_without_a_call() {
-    let link = FakeTable::link_without_frame();
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("big.png");
-    std::fs::write(&path, vec![0u8; IconDecoder::MAX_BYTES + 1]).expect("write icon");
-
-    let result = link.set_icon_file(&path);
-
-    assert!(matches!(result, Err(LinkError::IconFile { .. })), "got {result:?}");
-    assert!(FakeTable::with(|state| state.icon_calls.is_empty()));
-}
-
-#[test]
-fn empty_icon_file_is_refused_without_a_call() {
-    let link = FakeTable::link_without_frame();
-    let dir = tempfile::tempdir().expect("temp dir");
-    let path = dir.path().join("empty.png");
-    std::fs::write(&path, b"").expect("write icon");
-
-    let result = link.set_icon_file(&path);
-
-    assert!(matches!(result, Err(LinkError::IconFile { .. })), "got {result:?}");
-    assert!(FakeTable::with(|state| state.icon_calls.is_empty()));
-}
-
-#[test]
-fn missing_file_is_icon_file_error() {
-    let link = FakeTable::link_without_frame();
-    let dir = tempfile::tempdir().expect("temp dir");
-
-    let result = link.set_icon_file(&dir.path().join("absent.png"));
-
-    assert!(matches!(result, Err(LinkError::IconFile { .. })), "got {result:?}");
-    assert!(FakeTable::with(|state| state.icon_calls.is_empty()));
-}
-
-#[test]
-fn game_picture_gives_the_size_the_manager_reports() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.game_picture = (AmmStatus::Ok, 1920, 1080));
-
-    assert_eq!(link.game_picture(), Ok(GamePicture::new(1920, 1080)));
-}
-
-#[test]
-fn game_picture_maps_a_refusal() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.game_picture = (AmmStatus::NotPermitted, 0, 0));
-
-    assert_eq!(link.game_picture(), Err(LinkError::Status(AmmStatus::NotPermitted as i32)));
-}
-
-#[test]
-fn game_picture_on_an_old_manager_is_unsupported() {
-    let mut api = FakeTable::api();
-    api.game_picture = None;
-    let link = FakeTable::link_without_frame_on(api);
-
-    assert_eq!(link.game_picture(), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-}
-
-#[test]
-fn set_game_viewport_sends_the_rect_and_none_clears() {
-    let link = FakeTable::link_without_frame();
-
-    assert_eq!(link.set_game_viewport(Some([1.0, 2.0, 3.0, 4.0])), Ok(()));
-    assert_eq!(link.set_game_viewport(None), Ok(()));
-
-    assert_eq!(FakeTable::with(|state| state.game_viewports.clone()), vec![Some([1.0, 2.0, 3.0, 4.0]), None]);
-}
-
-#[test]
-fn set_game_viewport_on_an_old_manager_is_unsupported() {
-    let mut api = FakeTable::api();
-    api.set_game_viewport = None;
-    let link = FakeTable::link_without_frame_on(api);
-
-    assert_eq!(link.set_game_viewport(None), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-}
-
-#[test]
-fn set_render_size_sends_the_size_and_none_clears() {
-    let link = FakeTable::link_without_frame();
-
-    assert_eq!(link.set_render_size(Some(RenderSize::new(3840, 2160))), Ok(()));
-    assert_eq!(link.set_render_size(None), Ok(()));
+    connection.game.real_key(KeyCode::W.0, false);
+    connection.game.frame();
+    assert_eq!(connection.link.send_key(KeyCode::W, true), Ok(()));
+    connection.game.frame();
 
     assert_eq!(
-        FakeTable::with(|state| state.render_sizes.clone()),
-        vec![Some(AmmRenderSize { width: 3840, height: 2160 }), None]
+        connection.game.injected(),
+        vec!["key 0xA0 down".to_owned(), "key 0x57 down".to_owned(), "key 0x57 down".to_owned()],
+        "W is pressed again and Shift stays down"
     );
+    let events: Vec<ModEvent> = connection.link.events().collect();
+    assert_eq!(events, vec![ModEvent::FakeKeysReleased { reason: ReleaseReason::Reset }]);
 }
 
 #[test]
-fn set_render_size_maps_a_refusal() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.render_size_status = AmmStatus::NotPermitted);
+fn a_descriptor_for_another_mod_id_is_refused() {
+    let game = FakeTable::game();
+
+    let result = ManagerLink::start_without_frame(&game.ctx_named("@other/mod"), FakeTable::DESCRIPTOR);
 
     assert_eq!(
-        link.set_render_size(Some(RenderSize::new(3840, 2160))),
-        Err(LinkError::Status(AmmStatus::NotPermitted as i32))
+        result.err(),
+        Some(LinkError::IdMismatch { descriptor: "@test/alaydriem-test".to_owned(), module: "@other/mod".to_owned() })
     );
+    assert!(FakeTable::calls().is_empty(), "no register for a refused link");
 }
 
 #[test]
-fn render_size_reads_a_zero_wanted_size_as_none() {
-    let link = FakeTable::link_without_frame();
-    let actual = AmmRenderSize { width: 1600, height: 900 };
-    let state = AmmRenderSizeState {
-        size: size_of::<AmmRenderSizeState>() as u32,
-        wanted: AmmRenderSize { width: 0, height: 0 },
-        actual,
-        format: 28,
-    };
-    FakeTable::with(|fake| fake.render_size_state = (AmmStatus::Ok, state));
+fn input_on_a_loader_without_the_lease_area_is_not_available() {
+    let connection = FakeTable::link_without_frame_with(INPUT_DESCRIPTOR);
+    connection.game.withdraw_area(amml_api::Area::INPUT_LEASE);
 
-    assert_eq!(
-        link.render_size(),
-        Ok(RenderSizeState { wanted: None, actual: RenderSize::new(1600, 900), format: 28 })
-    );
+    assert_eq!(connection.link.acquire(Capability::Input), Err(LinkError::Api(amml_api::ApiError::NotAvailable)));
 }
 
 #[test]
-fn render_size_reads_the_wanted_and_the_actual_size() {
-    let link = FakeTable::link_without_frame();
-    let size = AmmRenderSize { width: 3840, height: 2160 };
-    let state =
-        AmmRenderSizeState { size: size_of::<AmmRenderSizeState>() as u32, wanted: size, actual: size, format: 28 };
-    FakeTable::with(|fake| fake.render_size_state = (AmmStatus::Ok, state));
+fn unread_events_are_bounded_and_the_oldest_go_first() {
+    let mut connection = FakeTable::link_without_frame();
+    for id in 0..300u64 {
+        let _ = connection.game.raise(&mut taken(id, 1));
+    }
 
-    let read = link.render_size();
+    let events: Vec<ModEvent> = connection.link.events().collect();
 
-    assert_eq!(
-        read.map(|state| (state.wanted, state.actual)),
-        Ok((Some(RenderSize::new(3840, 2160)), RenderSize::new(3840, 2160)))
-    );
-}
-
-#[test]
-fn render_size_on_an_old_manager_is_unsupported() {
-    let mut api = FakeTable::api();
-    api.set_render_size = None;
-    api.render_size = None;
-    let link = FakeTable::link_without_frame_on(api);
-
-    assert_eq!(link.set_render_size(None), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-    assert_eq!(link.render_size(), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-}
-
-#[test]
-fn present_count_reads_the_table() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.present_count = (AmmStatus::Ok, 4_000_000_001));
-
-    let count = link.present_count();
-    FakeTable::with(|state| state.present_count = (AmmStatus::UnknownHandle, 0));
-    let refused = link.present_count();
-
-    assert_eq!(count, Ok(4_000_000_001));
-    assert_eq!(refused, Err(LinkError::from(AmmStatus::UnknownHandle)));
-}
-
-#[test]
-fn watch_keys_passes_slice() {
-    let link = FakeTable::link_without_frame();
-
-    assert_eq!(link.watch_keys(&[0x57, 0x41, 0x53]), Ok(()));
-    assert_eq!(FakeTable::with(|state| state.watched()), vec![0x57, 0x41, 0x53]);
-
-    assert_eq!(link.watch_keys(&[]), Ok(()));
-    assert!(FakeTable::with(|state| state.watched()).is_empty());
-}
-
-#[test]
-fn send_key_passes_vk_and_down() {
-    let link = FakeTable::link_without_frame();
-
-    assert_eq!(link.send_key(0x10, true), Ok(()));
-    assert_eq!(link.send_key(0x10, false), Ok(()));
-
-    assert_eq!(FakeTable::with(|state| state.sent_keys()), vec![(0x10, true), (0x10, false)]);
-}
-
-#[test]
-fn send_key_on_minor_0_table_is_unsupported() {
-    let link = FakeTable::link_without_frame_on(FakeTable::api_minor_0());
-
-    assert_eq!(link.send_key(0x10, true), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-    assert_eq!(link.watch_keys(&[0x57]), Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-    assert!(FakeTable::with(|state| state.sent_keys().is_empty() && state.watched().is_empty()));
-}
-
-#[test]
-fn send_pointer_passes_the_abi_op_and_value() {
-    let link = FakeTable::link_without_frame();
-
-    assert_eq!(link.send_pointer(PointerOp::Button { button: PointerButton::Left, down: true }), Ok(()));
-    assert_eq!(link.send_pointer(PointerOp::Button { button: PointerButton::Right, down: false }), Ok(()));
-    assert_eq!(link.send_pointer(PointerOp::Button { button: PointerButton::Middle, down: true }), Ok(()));
-    assert_eq!(link.send_pointer(PointerOp::Wheel { steps: -3 }), Ok(()));
-
-    assert_eq!(FakeTable::with(|state| state.sent_pointer()), vec![(1, 1), (2, 0), (3, 1), (4, -3)]);
-}
-
-#[test]
-fn send_pointer_on_minor_1_table_is_unsupported() {
-    let link = FakeTable::link_without_frame_on(FakeTable::api_minor_1());
-
-    let sent = link.send_pointer(PointerOp::Wheel { steps: 1 });
-
-    assert_eq!(sent, Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-    assert!(FakeTable::with(|state| state.sent_pointer().is_empty()));
-}
-
-#[test]
-fn send_move_passes_the_axes_in_thousandths_and_the_flags() {
-    let link = FakeTable::link_without_frame();
-    let walk = MoveIntent { forward: 1.0, left: -0.25, jump: false, sneak: true, sprint: true };
-
-    assert_eq!(link.send_move(walk), Ok(()));
-    assert_eq!(link.send_move(MoveIntent::ZERO), Ok(()));
-
-    assert_eq!(FakeTable::with(|state| state.sent_moves()), vec![(1000, -250, 6), (0, 0, 0)]);
-}
-
-#[test]
-fn send_move_on_minor_3_table_is_unsupported() {
-    let link = FakeTable::link_without_frame_on(FakeTable::api_minor_3());
-
-    let sent = link.send_move(MoveIntent { forward: 1.0, ..MoveIntent::ZERO });
-
-    assert_eq!(sent, Err(LinkError::Status(AmmStatus::Unsupported as i32)));
-    assert!(FakeTable::with(|state| state.sent_moves().is_empty()));
-}
-
-#[test]
-fn send_move_maps_not_ready() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.send_move_status = AmmStatus::NotReady);
-
-    let sent = link.send_move(MoveIntent { forward: 1.0, ..MoveIntent::ZERO });
-
-    assert_eq!(sent, Err(LinkError::Status(AmmStatus::NotReady as i32)));
-}
-
-#[test]
-fn panel_open_follows_the_manager_answer() {
-    let link = FakeTable::link_without_frame();
-    let closed = link.panel_open();
-    FakeTable::with(|state| state.panel_open = true);
-
-    assert_eq!((closed, link.panel_open()), (false, true));
-}
-
-#[test]
-fn panel_open_on_minor_1_table_is_false() {
-    let link = FakeTable::link_without_frame_on(FakeTable::api_minor_1());
-    FakeTable::with(|state| state.panel_open = true);
-
-    assert!(!link.panel_open());
-}
-
-#[test]
-fn send_pointer_maps_not_permitted() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.send_pointer_status = AmmStatus::NotPermitted);
-
-    let sent = link.send_pointer(PointerOp::Button { button: PointerButton::Left, down: true });
-
-    assert_eq!(sent, Err(LinkError::Status(AmmStatus::NotPermitted as i32)));
-}
-
-#[test]
-fn send_key_maps_not_permitted() {
-    let link = FakeTable::link_without_frame();
-    FakeTable::with(|state| state.send_key_status = AmmStatus::NotPermitted);
-
-    assert_eq!(link.send_key(0x10, true), Err(LinkError::Status(AmmStatus::NotPermitted as i32)));
+    assert_eq!(events.len(), 256);
+    assert_eq!(events.first(), Some(&ModEvent::ScreenshotTaken { id: ShotId(44), ok: true }));
+    assert_eq!(events.last(), Some(&ModEvent::ScreenshotTaken { id: ShotId(299), ok: true }));
 }

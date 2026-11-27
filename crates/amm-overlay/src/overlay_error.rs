@@ -1,5 +1,7 @@
-/// Why a part of the overlay could not start: a pipeline object of `LayerRenderer::new`, the DXGI probe, a hook,
-/// or a second install.
+use amml_api::ApiError;
+
+/// Why a part of the overlay could not run: a pipeline object of `LayerRenderer::new`, or the game picture copy of
+/// `SurfaceRenderer::refresh_game_picture`.
 #[derive(Debug, thiserror::Error)]
 pub enum OverlayError {
     #[error("could not create the {object}: {source}")]
@@ -8,18 +10,15 @@ pub enum OverlayError {
         #[source]
         source: windows::core::Error,
     },
-    #[error("the swap chain probe failed at {step}: {source}")]
-    Probe {
-        step: &'static str,
+    #[error("the overlay has no device objects for this surface")]
+    NoDevice,
+    #[error("a back buffer of {width} x {height} in format {format} cannot be copied into a game picture")]
+    PictureSurface { width: u32, height: u32, format: u32 },
+    #[error("the loader did not copy the back buffer: {source}")]
+    Copy {
         #[source]
-        source: windows::core::Error,
+        source: ApiError,
     },
-    #[error("the hook installer refused: {reason}")]
-    Hook { reason: String },
-    #[error("an overlay is already installed in this process")]
-    AlreadyInstalled,
-    #[error("an earlier overlay was left alive by a shutdown that timed out")]
-    Leaked,
 }
 
 impl OverlayError {

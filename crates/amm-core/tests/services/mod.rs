@@ -1,5 +1,4 @@
 mod abi;
-mod capture;
 mod clash;
 mod descriptor;
 #[cfg(feature = "egui")]
@@ -11,6 +10,7 @@ mod lease;
 mod manager;
 mod menu;
 mod panic;
+mod path;
 mod registry;
 mod render;
 mod settings;

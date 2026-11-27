@@ -1,3 +1,3 @@
-pub mod dup_error;
+pub mod paths_error;
 
-pub use dup_error::DupError;
+pub use paths_error::PathsError;

@@ -1,5 +1,5 @@
 use amm_abi::types::AmmStatus;
-use amm_core::errors::{CaptureError, DescriptorError, LinkError, ManagerError, RegistryError};
+use amm_core::errors::{DescriptorError, LinkError, ManagerError, RegistryError};
 
 #[test]
 fn registry_errors_map_to_their_own_status() {
@@ -22,15 +22,8 @@ fn manager_errors_delegate_to_the_inner_mapping() {
 }
 
 #[test]
-fn a_missing_game_entry_is_unsupported_a_missing_player_is_not_ready_and_a_full_key_queue_is_busy() {
-    assert_eq!(AmmStatus::from(&ManagerError::Unsupported), AmmStatus::Unsupported);
-    assert_eq!(AmmStatus::from(&ManagerError::NotReady), AmmStatus::NotReady);
-    assert_eq!(AmmStatus::from(&ManagerError::KeyQueueFull), AmmStatus::Busy);
-}
-
-#[test]
 fn a_missing_manager_status_becomes_a_missing_manager_link_error() {
-    assert_eq!(LinkError::from(AmmStatus::ManagerMissing), LinkError::ManagerMissing);
+    assert_eq!(LinkError::from(AmmStatus::ManagerMissing), LinkError::NoManager);
 }
 
 #[test]
@@ -45,15 +38,7 @@ fn a_status_integer_converts_back_and_an_unknown_one_is_rejected() {
     assert_eq!(AmmStatus::try_from(11), Ok(AmmStatus::ManagerMissing));
     assert_eq!(AmmStatus::try_from(12), Ok(AmmStatus::Busy));
     assert_eq!(AmmStatus::try_from(13), Ok(AmmStatus::NotReady));
-    assert_eq!(AmmStatus::try_from(14), Err(14));
+    assert_eq!(AmmStatus::try_from(14), Ok(AmmStatus::Disabled));
+    assert_eq!(AmmStatus::try_from(15), Err(15));
     assert_eq!(AmmStatus::try_from(-1), Err(-1));
-}
-
-#[test]
-fn capture_errors_map_to_their_status_and_busy_has_its_own() {
-    assert_eq!(AmmStatus::from(&CaptureError::UnknownMod), AmmStatus::UnknownHandle);
-    assert_eq!(AmmStatus::from(&CaptureError::NotPermitted), AmmStatus::NotPermitted);
-    assert_eq!(AmmStatus::from(&CaptureError::InvalidPath), AmmStatus::InvalidArgument);
-    assert_eq!(AmmStatus::from(&CaptureError::Busy), AmmStatus::Busy);
-    assert_eq!(LinkError::from(AmmStatus::Busy), LinkError::Status(12));
 }

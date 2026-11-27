@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use amm_core::config::{ExclusiveResolution, ManagerConfig, PairKey, SuspensionResolution};
 use amm_core::errors::ManagerError;
 use amm_core::services::manager::ManagerService;
-use amm_core::services::settings::ManagerConfigFile;
+use amm_core::services::settings::{ChordText, ManagerConfigFile};
 use amm_core::structs::descriptor::{Capability, Chord};
 use amm_core::structs::event::{KeybindPhase, ModEvent};
 use amm_core::structs::frame::{CursorShape, FrameReplyData, LayerKind, MenuScreen};
-use amm_core::structs::input::{FakeKeyOp, InputEvent, Modifiers, MoveIntent, PointerButton, PointerOp, TurnAxis};
+use amm_core::structs::input::{InputEvent, Modifiers};
 use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::registry::ModIndex;
 use amm_core::structs::settings::{ConfigWarning, HclDocument};
@@ -15,43 +15,24 @@ use amm_core::structs::snapshot::LayerEntry;
 use amm_core::structs::toast::ToastKind;
 use amm_core::structs::write::{SaveStatus, WriteRequest};
 
-use crate::support::log_capture::LogCapture;
-
 const FREECAM: &str = include_str!("../../../fixtures/four_mods/freecam.hcl");
 const DEJAVU: &str = include_str!("../../../fixtures/four_mods/dejavu.hcl");
 const MINIMAP: &str = include_str!("../../../fixtures/four_mods/minimap.hcl");
 const LEVELS: &str = include_str!("../../../fixtures/four_mods/levels.hcl");
 const HEADLESS: &str = include_str!("../../../fixtures/four_mods/headless.hcl");
 
-const NO_MODS: Modifiers = Modifiers { ctrl: false, shift: false, alt: false };
 const CTRL: Modifiers = Modifiers { ctrl: true, shift: false, alt: false };
 
-const KEY_G: u32 = 0x47;
-const KEY_H: u32 = 0x48;
-const KEY_J: u32 = 0x4A;
+const KEY_B: u32 = 0x42;
+const KEY_E: u32 = 0x45;
 const KEY_O: u32 = 0x4F;
 const KEY_P: u32 = 0x50;
-const KEY_W: u32 = 0x57;
 const KEY_F9: u32 = 0x78;
 
 const HUD: u8 = 1;
 const OVERLAY: u8 = 2;
 
-// The game feed knows the keyboard controller and the mouse device, so fake keys and buttons reach the game.
 fn manager() -> ManagerService {
-    let mut manager = manager_without_key_feed();
-    manager.set_key_feed_ready(true);
-    manager.set_pointer_feed_ready(true);
-    manager
-}
-
-fn manager_without_pointer_feed() -> ManagerService {
-    let mut manager = manager_without_key_feed();
-    manager.set_key_feed_ready(true);
-    manager
-}
-
-fn manager_without_key_feed() -> ManagerService {
     ManagerService::new(ManagerConfig::default(), None)
 }
 
@@ -174,42 +155,63 @@ fn disabling_a_mod_releases_its_leases_and_drops_its_layer() {
 }
 
 #[test]
-fn snapshot_orders_hud_then_overlay_then_input_holders_most_recent_on_top() {
+fn snapshot_orders_hud_then_overlay_in_registration_order() {
     let mut manager = manager();
-    let editor = [("Overlay", "Shared"), ("Input", "Shared")];
-    let a = register(&mut manager, &descriptor("editor-a", &editor, ""), "editor-a");
-    let b = register(&mut manager, &descriptor("editor-b", &editor, ""), "editor-b");
+    let a = register(&mut manager, &descriptor("editor-a", &[("Overlay", "Shared")], ""), "editor-a");
+    let b = register(&mut manager, &descriptor("editor-b", &[("Overlay", "Shared")], ""), "editor-b");
     let hud = register(&mut manager, &descriptor("hud", &[("Hud", "Shared")], ""), "hud");
-    let panel = register(&mut manager, &descriptor("panel", &[("Overlay", "Shared")], ""), "panel");
-    let steps = [
-        (b, Capability::Input),
-        (b, Capability::Overlay),
-        (a, Capability::Overlay),
-        (a, Capability::Input),
-        (hud, Capability::Hud),
-        (panel, Capability::Overlay),
-    ];
-    for (index, capability) in steps {
+    for (index, capability) in [(b, Capability::Overlay), (hud, Capability::Hud), (a, Capability::Overlay)] {
         manager.acquire(index, capability, 0).expect("known");
     }
 
     let order: Vec<(ModIndex, LayerKind, u8)> =
         layers(&manager).iter().map(|entry| (entry.mod_index, entry.kind, entry.allowed)).collect();
+
     assert_eq!(
         order,
-        vec![
-            (hud, LayerKind::Hud, HUD),
-            (panel, LayerKind::Overlay, OVERLAY),
-            (b, LayerKind::Overlay, OVERLAY),
-            (a, LayerKind::Overlay, OVERLAY),
-        ]
+        vec![(hud, LayerKind::Hud, HUD), (a, LayerKind::Overlay, OVERLAY), (b, LayerKind::Overlay, OVERLAY)]
     );
+}
 
-    manager.release(b, Capability::Input);
-    manager.acquire(b, Capability::Input, 0).expect("known");
+#[test]
+fn input_is_not_a_manager_lease() {
+    let mut manager = manager();
+    let headless = register(&mut manager, HEADLESS, "headless");
 
-    let top: Vec<ModIndex> = layers(&manager).iter().map(|entry| entry.mod_index).collect();
-    assert_eq!(top, vec![hud, panel, a, b]);
+    assert_eq!(manager.acquire(headless, Capability::Input, 0), Err(ManagerError::NotPermitted));
+    assert!(manager.arbiter().holders(Capability::Input).is_empty());
+    assert!(events(&mut manager, headless).is_empty());
+}
+
+#[test]
+fn a_keybind_chord_is_the_stored_chord_or_the_default() {
+    let mut manager = manager();
+    let freecam = register(&mut manager, FREECAM, "freecam");
+    let toggle = action(&manager, freecam, "toggle");
+    assert_eq!(manager.keybind_chord(freecam, toggle), ChordText::parse("Ctrl+P"));
+
+    manager.set_setting(freecam, "keys.toggle", "\"Ctrl+J\"", 0).expect("a chord fits a chord field");
+
+    assert_eq!(manager.keybind_chord(freecam, toggle), ChordText::parse("Ctrl+J"));
+    assert_eq!(manager.keybind_chord(freecam, u16::MAX), None);
+    assert_eq!(manager.keybind_chord(ModIndex(30), 0), None);
+}
+
+#[test]
+fn a_keybind_is_down_from_its_press_to_its_release() {
+    let mut manager = manager();
+    let freecam = register(&mut manager, FREECAM, "freecam");
+    let toggle = action(&manager, freecam, "toggle");
+    let chord = manager.keybind_chord(freecam, toggle).expect("bound");
+    let mods = Modifiers { ctrl: chord.ctrl, shift: chord.shift, alt: chord.alt };
+    assert!(!manager.keybind_down(freecam, toggle));
+
+    manager.route(&key(chord.key, true, mods), 0);
+    assert!(manager.keybind_down(freecam, toggle));
+
+    manager.route(&key(chord.key, false, mods), 0);
+    assert!(!manager.keybind_down(freecam, toggle));
+    assert!(!manager.keybind_down(freecam, u16::MAX));
 }
 
 #[test]
@@ -290,74 +292,6 @@ fn hud_claim_with_hide_vanilla_hud_hides_it_until_release() {
 
     manager.release(freecam, Capability::Hud);
     assert!(!manager.snapshot().hide_vanilla_hud);
-}
-
-// A descriptor with one Input claim of the given mode, with or without block_player_turn.
-fn input_holder(id: &str, mode: &str, blocks: bool) -> String {
-    let flag = if blocks { "  block_player_turn = true\n" } else { "" };
-    let extra = format!("claim \"Input\" {{\n  mode = \"{mode}\"\n  reason = \"r\"\n{flag}}}\n");
-    descriptor(id, &[], &extra)
-}
-
-#[test]
-fn the_player_turn_is_blocked_only_while_a_flagged_input_holder_is_active() {
-    let mut manager = manager();
-    let look = register(&mut manager, &input_holder("look", "Shared", true), "look");
-    let plain = register(&mut manager, &input_holder("plain", "Shared", false), "plain");
-    let owner = register(&mut manager, &input_holder("owner", "Exclusive", false), "owner");
-    assert!(!manager.snapshot().blocks_player_turn);
-
-    manager.acquire(plain, Capability::Input, 0).expect("known");
-    assert!(!manager.snapshot().blocks_player_turn);
-
-    manager.acquire(look, Capability::Input, 0).expect("known");
-    assert!(manager.snapshot().blocks_player_turn);
-
-    manager.acquire(owner, Capability::Input, 0).expect("known");
-    assert!(!manager.snapshot().blocks_player_turn);
-
-    manager.release(owner, Capability::Input);
-    assert!(manager.snapshot().blocks_player_turn);
-
-    manager.release(look, Capability::Input);
-    assert!(!manager.snapshot().blocks_player_turn);
-}
-
-#[test]
-fn the_gamepad_is_blocked_only_while_a_full_block_holder_is_active() {
-    let mut manager = manager();
-    let headless = register(&mut manager, HEADLESS, "headless");
-    let owner = register(&mut manager, &input_holder("owner", "Exclusive", false), "owner");
-
-    manager.acquire(owner, Capability::Input, 0).expect("known");
-    assert!(!manager.snapshot().blocks_gamepad);
-    manager.release(owner, Capability::Input);
-
-    manager.acquire(headless, Capability::Input, 0).expect("known");
-    assert!(manager.snapshot().blocks_gamepad);
-
-    manager.release(headless, Capability::Input);
-    assert!(!manager.snapshot().blocks_gamepad);
-}
-
-#[test]
-fn block_player_turn_and_pass_pointer_motion_stay_independent() {
-    let mut manager = manager();
-    let extra = "claim \"Input\" {
-  mode = \"Shared\"
-  reason = \"r\"
-  block_player_turn = true
-  pass_pointer_motion = true
-}
-";
-    let look = register(&mut manager, &descriptor("look", &[], extra), "look");
-    manager.acquire(look, Capability::Input, 0).expect("known");
-
-    let decision = manager.route(&InputEvent::PointerDelta { dx: 2.0, dy: 1.0 }, 0);
-
-    assert!(manager.snapshot().blocks_player_turn);
-    assert!(!decision.consume_from_game);
-    assert_eq!(decision.raw_targets.iter().collect::<Vec<_>>(), vec![look]);
 }
 
 #[test]
@@ -582,34 +516,18 @@ fn failures_must_be_consecutive_to_disable_a_mod() {
 }
 
 #[test]
-fn a_new_mod_in_a_reused_slot_gets_no_stray_key_up() {
+fn a_new_mod_in_a_reused_slot_gets_no_stray_keybind_release() {
     let mut manager = manager();
     let freecam = register(&mut manager, FREECAM, "freecam");
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
-    manager.route(&key(KEY_G, true, NO_MODS), 0);
+    manager.route(&key(KEY_P, true, CTRL), 0);
     manager.unregister(freecam);
-    let minimap = register(&mut manager, MINIMAP, "minimap");
-    assert_eq!(minimap, freecam);
-    manager.acquire(minimap, Capability::Input, 0).expect("known");
-    events(&mut manager, minimap);
+    let other = register(&mut manager, FREECAM, "freecam");
+    assert_eq!(other, freecam);
+    events(&mut manager, other);
 
-    manager.route(&key(KEY_G, false, NO_MODS), 0);
+    manager.route(&key(KEY_P, false, CTRL), 0);
 
-    assert!(events(&mut manager, minimap).is_empty());
-}
-
-#[test]
-fn key_down_is_false_for_a_mod_without_input() {
-    let mut manager = manager();
-    let freecam = register(&mut manager, FREECAM, "freecam");
-    let minimap = register(&mut manager, MINIMAP, "minimap");
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
-
-    manager.route(&key(KEY_G, true, NO_MODS), 0);
-
-    assert!(manager.key_down(freecam, KEY_G));
-    assert!(!manager.key_down(minimap, KEY_G));
-    assert!(!manager.key_down(freecam, KEY_H));
+    assert!(events(&mut manager, other).is_empty());
 }
 
 #[test]
@@ -697,31 +615,19 @@ fn set_cursor_mode_needs_input_or_overlay() {
 }
 
 #[test]
-fn focus_lost_releases_every_held_key_to_its_receiver() {
+fn focus_lost_releases_every_held_keybind_to_its_mod() {
     let mut manager = manager();
     let freecam = register(&mut manager, FREECAM, "freecam");
-    let minimap = register(&mut manager, MINIMAP, "minimap");
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
-    manager.acquire(minimap, Capability::Input, 0).expect("known");
-    events(&mut manager, freecam);
-    events(&mut manager, minimap);
-    let fly_forward = action(&manager, freecam, "fly_forward");
+    let toggle = action(&manager, freecam, "toggle");
 
-    manager.route(&key(KEY_G, true, NO_MODS), 0);
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
+    manager.route(&key(KEY_P, true, CTRL), 0);
     manager.route(&InputEvent::FocusLost, 0);
 
-    let down = |vk| ModEvent::Key { vk, down: true, repeat: false };
-    let up = |vk| ModEvent::Key { vk, down: false, repeat: false };
-    let bind = |phase| ModEvent::Keybind { action: fly_forward, phase };
-    assert_eq!(
-        events(&mut manager, freecam),
-        vec![down(KEY_G), bind(KeybindPhase::Pressed), up(KEY_G), bind(KeybindPhase::Released)]
-    );
-    assert_eq!(events(&mut manager, minimap), vec![down(KEY_G), up(KEY_G)]);
-    assert!(!manager.key_down(freecam, KEY_G));
+    let bind = |phase| ModEvent::Keybind { action: toggle, phase };
+    assert_eq!(events(&mut manager, freecam), vec![bind(KeybindPhase::Pressed), bind(KeybindPhase::Released)]);
+    assert!(!manager.keybind_down(freecam, toggle));
 
-    manager.route(&key(KEY_G, false, NO_MODS), 0);
+    manager.route(&key(KEY_P, false, CTRL), 0);
 
     assert!(events(&mut manager, freecam).is_empty());
 }
@@ -731,15 +637,17 @@ fn full_event_queue_drops_are_counted_in_telemetry() {
     let mut config = ManagerConfig::default();
     config.budgets.event_queue = 2;
     let mut manager = ManagerService::new(config, None);
-    let freecam = register(&mut manager, FREECAM, "freecam");
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
+    register(&mut manager, FREECAM, "freecam");
 
-    for vk in [KEY_G, KEY_H, KEY_J] {
-        manager.route(&key(vk, true, NO_MODS), 0);
+    for vk in [KEY_P, KEY_B, KEY_E, KEY_P] {
+        manager.route(&key(vk, true, CTRL), 0);
+        manager.route(&key(vk, false, CTRL), 0);
     }
 
-    assert_eq!(manager.telemetry().event_drops(), 2);
-    assert!(manager.telemetry().report().contains("event_drops=2"));
+    // two slots: each press drops the older unreleased press, and once both slots hold releases every new event is
+    // dropped
+    assert_eq!(manager.telemetry().event_drops(), 6);
+    assert!(manager.telemetry().report().contains("event_drops=6"));
 }
 
 fn reply(wants_pointer: bool, wants_keyboard: bool, layer_rect: [f32; 4]) -> FrameReplyData {
@@ -885,1138 +793,4 @@ fn a_hud_layer_that_comes_back_does_not_keep_the_keyboard_it_wanted_before() {
     assert!(layers(&manager).iter().any(|entry| entry.mod_index == shared && entry.kind == LayerKind::Hud));
     assert!(!typed.raw_targets.contains(shared));
     assert!(!click.raw_targets.contains(shared));
-}
-
-const KEY_SHIFT: u32 = 0x10;
-const KEY_F3: u32 = 0x72;
-
-// A mod with a shared Input claim and the keybind "sneak" on F3+W.
-fn toggles_mod() -> String {
-    let extra = "claim \"Input\" {
-  mode = \"Shared\"
-  reason = \"r\"
-}
-keybind \"sneak\" {
-  label       = \"Sneak\"
-  default     = \"F3+W\"
-  capability  = \"Input\"
-  scope       = \"Global\"
-  config_path = \"keys.sneak\"
-}
-section \"keys\" {
-  title = \"Keys\"
-  field \"keys.sneak\" {
-    label   = \"Sneak\"
-    kind    = \"chord\"
-    default = \"F3+W\"
-    apply   = \"Live\"
-  }
-}
-";
-    descriptor("toggles", &[], extra)
-}
-
-// The mod holds no Input lease, like a mod that only presses fake keys.
-fn toggles(manager: &mut ManagerService) -> ModIndex {
-    register(manager, &toggles_mod(), "toggles")
-}
-
-fn toggles_with_lease(manager: &mut ManagerService) -> ModIndex {
-    let index = toggles(manager);
-    manager.acquire(index, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
-    events(manager, index);
-    index
-}
-
-fn fake_ops(manager: &mut ManagerService) -> Vec<FakeKeyOp> {
-    let mut out = Vec::new();
-    manager.take_fake_keys(&mut out);
-    out
-}
-
-fn fake_down(vk: u32) -> FakeKeyOp {
-    FakeKeyOp { vk, down: true }
-}
-
-fn fake_up(vk: u32) -> FakeKeyOp {
-    FakeKeyOp { vk, down: false }
-}
-
-#[test]
-fn watched_key_reaches_watcher_and_game() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.watch_keys(m, &[KEY_W]).expect("claims Input");
-
-    let decision = manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    assert!(!decision.consume_from_game);
-    assert!(events(&mut manager, m).contains(&ModEvent::Key { vk: KEY_W, down: true, repeat: false }));
-}
-
-#[test]
-fn watched_key_is_not_sent_twice_to_a_raw_target() {
-    let mut manager = manager();
-    let m = toggles_with_lease(&mut manager);
-    manager.watch_keys(m, &[KEY_W]).expect("claims Input");
-
-    let decision = manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    assert!(decision.raw_targets.contains(m));
-    let keys = events(&mut manager, m).into_iter().filter(|event| matches!(event, ModEvent::Key { .. })).count();
-    assert_eq!(keys, 1);
-}
-
-#[test]
-fn keybind_press_is_not_sent_to_watchers() {
-    let mut manager = manager();
-    let m = toggles_with_lease(&mut manager);
-    let sneak = action(&manager, m, "sneak");
-    manager.watch_keys(m, &[KEY_W]).expect("claims Input");
-    manager.route(&key(KEY_F3, true, NO_MODS), 0);
-    events(&mut manager, m);
-
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    let got = events(&mut manager, m);
-    assert!(got.contains(&ModEvent::Keybind { action: sneak, phase: KeybindPhase::Pressed }));
-    assert!(!got.iter().any(|event| matches!(event, ModEvent::Key { vk: KEY_W, .. })));
-}
-
-#[test]
-fn real_up_is_held_back_while_faked() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-
-    let down = manager.route(&key(KEY_SHIFT, true, NO_MODS), 0);
-    let up = manager.route(&key(KEY_SHIFT, false, NO_MODS), 0);
-
-    assert!(!down.consume_from_game);
-    assert!(up.consume_from_game);
-}
-
-#[test]
-fn send_key_down_twice_queues_one_op() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT)]);
-}
-
-#[test]
-fn send_key_up_without_a_hold_queues_nothing() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-
-    manager.send_key(m, KEY_SHIFT, false).expect("claims Input");
-
-    assert!(fake_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn send_key_up_while_real_key_down_sends_nothing() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_W, true).expect("claims Input");
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    manager.send_key(m, KEY_W, false).expect("claims Input");
-    let up = manager.route(&key(KEY_W, false, NO_MODS), 0);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W)]);
-    assert!(!up.consume_from_game);
-}
-
-#[test]
-fn send_key_up_after_a_hold_queues_the_up() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_W, true).expect("claims Input");
-
-    manager.send_key(m, KEY_W, false).expect("claims Input");
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W), fake_up(KEY_W)]);
-}
-
-#[test]
-fn chord_off_while_chord_key_held_queues_the_up() {
-    let mut manager = manager();
-    let m = toggles_with_lease(&mut manager);
-    manager.send_key(m, KEY_W, true).expect("claims Input");
-    manager.route(&key(KEY_F3, true, NO_MODS), 0);
-    let down = manager.route(&key(KEY_W, true, NO_MODS), 0);
-    assert!(down.consume_from_game);
-
-    manager.send_key(m, KEY_W, false).expect("claims Input");
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W), fake_up(KEY_W)]);
-}
-
-#[test]
-fn release_all_while_swallowed_key_held_queues_the_up() {
-    let mut manager = manager();
-    let m = toggles_with_lease(&mut manager);
-    manager.send_key(m, KEY_W, true).expect("claims Input");
-    manager.route(&key(KEY_F3, true, NO_MODS), 0);
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    manager.set_panel_open(true);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W), fake_up(KEY_W)]);
-}
-
-#[test]
-fn focus_lost_releases_and_notifies() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-
-    manager.route(&InputEvent::FocusLost, 0);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT), fake_up(KEY_SHIFT)]);
-    assert!(events(&mut manager, m).contains(&ModEvent::FakeKeysReleased));
-}
-
-#[test]
-fn release_keeps_the_up_back_while_the_real_key_is_down() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-    manager.send_key(m, KEY_W, true).expect("claims Input");
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    manager.world_left();
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT), fake_down(KEY_W), fake_up(KEY_SHIFT)]);
-    assert!(events(&mut manager, m).contains(&ModEvent::FakeKeysReleased));
-}
-
-#[test]
-fn panel_open_releases() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-
-    manager.set_panel_open(true);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT), fake_up(KEY_SHIFT)]);
-    assert!(events(&mut manager, m).contains(&ModEvent::FakeKeysReleased));
-}
-
-#[test]
-fn panel_close_keeps_fake_keys() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.set_panel_open(true);
-    manager.set_panel_open(false);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-
-    manager.set_panel_open(false);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT)]);
-}
-
-#[test]
-fn world_left_releases() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-
-    manager.world_left();
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT), fake_up(KEY_SHIFT)]);
-    assert!(events(&mut manager, m).contains(&ModEvent::FakeKeysReleased));
-}
-
-#[test]
-fn disable_releases_and_forgets_watch() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-    manager.watch_keys(m, &[KEY_W]).expect("claims Input");
-
-    manager.set_enabled(m, false);
-    manager.set_enabled(m, true);
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT), fake_up(KEY_SHIFT)]);
-    let got = events(&mut manager, m);
-    assert!(got.contains(&ModEvent::FakeKeysReleased));
-    assert!(!got.iter().any(|event| matches!(event, ModEvent::Key { .. })));
-}
-
-#[test]
-fn unregister_releases() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-
-    manager.unregister(m);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT), fake_up(KEY_SHIFT)]);
-}
-
-#[test]
-fn unregister_forgets_the_watch_for_a_new_mod_in_the_slot() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.watch_keys(m, &[KEY_W]).expect("claims Input");
-    manager.unregister(m);
-    let next = toggles(&mut manager);
-
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    assert!(!events(&mut manager, next).iter().any(|event| matches!(event, ModEvent::Key { .. })));
-}
-
-#[test]
-fn send_key_without_input_claim_is_not_permitted() {
-    let mut manager = manager();
-    let m = register(&mut manager, &descriptor("plain", &[("Hud", "Shared")], ""), "plain");
-
-    assert_eq!(manager.send_key(m, KEY_SHIFT, true), Err(ManagerError::NotPermitted));
-    assert_eq!(manager.watch_keys(m, &[KEY_W]), Err(ManagerError::NotPermitted));
-    assert!(fake_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn send_key_vk_256_is_invalid() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-
-    assert_eq!(manager.send_key(m, 256, true), Err(ManagerError::InvalidArgument));
-    assert_eq!(manager.watch_keys(m, &[KEY_W, 256]), Err(ManagerError::InvalidArgument));
-    assert_eq!(manager.watch_keys(m, &[KEY_W; 33]), Err(ManagerError::InvalidArgument));
-    assert!(manager.watch_keys(m, &[KEY_W; 32]).is_ok());
-}
-
-#[test]
-fn watch_keys_with_an_empty_slice_clears_the_set() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.watch_keys(m, &[KEY_W]).expect("claims Input");
-
-    manager.watch_keys(m, &[]).expect("claims Input");
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-
-    assert!(!events(&mut manager, m).iter().any(|event| matches!(event, ModEvent::Key { .. })));
-}
-
-#[test]
-fn send_key_while_panel_open_is_not_permitted() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.set_panel_open(true);
-
-    assert_eq!(manager.send_key(m, KEY_SHIFT, true), Err(ManagerError::NotPermitted));
-}
-
-#[test]
-fn send_key_while_another_mod_holds_input_exclusively_is_not_permitted() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    let owner = register(&mut manager, &input_holder("owner", "Exclusive", false), "owner");
-    manager.acquire(owner, Capability::Input, 0).expect("known");
-
-    assert_eq!(manager.send_key(m, KEY_SHIFT, true), Err(ManagerError::NotPermitted));
-}
-
-#[test]
-fn send_key_while_other_mod_holds_input_is_not_permitted() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    let other = register(&mut manager, &input_holder("other", "Shared", false), "other");
-    manager.acquire(other, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
-
-    assert_eq!(manager.send_key(m, KEY_SHIFT, true), Err(ManagerError::NotPermitted));
-    assert!(fake_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn input_lease_granted_to_other_releases_fake_keys() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-    let other = register(&mut manager, &input_holder("other", "Shared", false), "other");
-
-    manager.acquire(other, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT), fake_up(KEY_SHIFT)]);
-    assert!(events(&mut manager, m).contains(&ModEvent::FakeKeysReleased));
-}
-
-#[test]
-fn send_key_up_allowed_while_other_holds_input() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_SHIFT, true).expect("claims Input");
-    let other = register(&mut manager, &input_holder("other", "Shared", false), "other");
-    manager.acquire(other, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
-
-    assert_eq!(manager.send_key(m, KEY_SHIFT, false), Ok(()));
-}
-
-#[test]
-fn send_key_without_a_controller_is_not_ready() {
-    let mut manager = manager_without_key_feed();
-    let m = toggles(&mut manager);
-
-    assert_eq!(manager.send_key(m, KEY_SHIFT, true), Err(ManagerError::NotReady));
-    assert_eq!(manager.send_key(m, KEY_SHIFT, false), Ok(()));
-    assert!(fake_ops(&mut manager).is_empty());
-
-    manager.set_key_feed_ready(true);
-
-    assert_eq!(manager.send_key(m, KEY_SHIFT, true), Ok(()));
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_SHIFT)]);
-}
-
-#[test]
-fn send_key_with_a_full_queue_is_busy() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    for vk in 0..128 {
-        manager.send_key(m, vk, true).expect("room");
-        manager.send_key(m, vk, false).expect("room");
-    }
-
-    assert_eq!(manager.send_key(m, KEY_W, true), Err(ManagerError::KeyQueueFull));
-    let queued = fake_ops(&mut manager);
-    assert_eq!(queued.len(), 256);
-    assert_eq!(queued.iter().filter(|op| op.vk == KEY_W).count(), 2);
-
-    assert_eq!(manager.send_key(m, KEY_W, true), Ok(()));
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W)]);
-}
-
-#[test]
-fn the_no_controller_condition_is_logged_once() {
-    LogCapture::install();
-    let mut manager = manager_without_key_feed();
-    let m = toggles(&mut manager);
-
-    for _ in 0..3 {
-        assert_eq!(manager.send_key(m, KEY_SHIFT, true), Err(ManagerError::NotReady));
-    }
-    assert_eq!(LogCapture::count(ManagerService::NO_KEY_FEED_LINE), 1);
-
-    manager.set_key_feed_ready(true);
-    manager.set_key_feed_ready(false);
-    manager.send_key(m, KEY_SHIFT, true).expect_err("no controller again");
-    manager.send_key(m, KEY_SHIFT, true).expect_err("no controller again");
-
-    assert_eq!(LogCapture::count(ManagerService::NO_KEY_FEED_LINE), 2);
-}
-
-#[test]
-fn the_full_queue_condition_is_logged_once() {
-    LogCapture::install();
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    for vk in 0..128 {
-        manager.send_key(m, vk, true).expect("room");
-        manager.send_key(m, vk, false).expect("room");
-    }
-
-    for _ in 0..3 {
-        assert_eq!(manager.send_key(m, KEY_W, true), Err(ManagerError::KeyQueueFull));
-    }
-    assert_eq!(LogCapture::count(ManagerService::KEY_QUEUE_FULL_LINE), 1);
-
-    fake_ops(&mut manager);
-    manager.send_key(m, KEY_W, true).expect("room again");
-    for vk in 128..255 {
-        manager.send_key(m, vk, true).expect("room");
-        manager.send_key(m, vk, false).expect("room");
-    }
-    manager.send_key(m, 255, true).expect("the last room");
-    manager.send_key(m, KEY_SHIFT, true).expect_err("full again");
-
-    assert_eq!(LogCapture::count(ManagerService::KEY_QUEUE_FULL_LINE), 2);
-}
-
-fn headless_with_lease(manager: &mut ManagerService) -> ModIndex {
-    let index = register(manager, HEADLESS, "headless");
-    let outcome = manager.acquire(index, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
-    assert_eq!(outcome, AcquireOutcome::Granted);
-    events(manager, index);
-    index
-}
-
-#[test]
-fn focus_lost_under_full_block_keeps_the_holders_fake_keys() {
-    let mut manager = manager();
-    let headless = headless_with_lease(&mut manager);
-    manager.send_key(headless, KEY_W, true).expect("claims Input");
-    manager.route(&key(KEY_G, true, NO_MODS), 0);
-    events(&mut manager, headless);
-
-    let decision = manager.route(&InputEvent::FocusLost, 0);
-
-    assert!(decision.consume_from_game);
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W)]);
-    assert!(events(&mut manager, headless).is_empty());
-    assert!(manager.key_down(headless, KEY_G));
-}
-
-#[test]
-fn focus_lost_without_full_block_reaches_the_game() {
-    let mut manager = manager();
-    let m = toggles_with_lease(&mut manager);
-    manager.send_key(m, KEY_W, true).expect("claims Input");
-
-    let decision = manager.route(&InputEvent::FocusLost, 0);
-
-    assert!(!decision.consume_from_game);
-    assert_eq!(fake_ops(&mut manager), vec![fake_down(KEY_W), fake_up(KEY_W)]);
-}
-
-#[test]
-fn focus_lost_under_full_block_still_releases_other_mods_keys() {
-    let mut manager = manager();
-    let freecam = register(&mut manager, FREECAM, "freecam");
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
-    let fly_forward = action(&manager, freecam, "fly_forward");
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-    manager.route(&key(KEY_G, true, NO_MODS), 0);
-    let headless = headless_with_lease(&mut manager);
-    events(&mut manager, freecam);
-
-    manager.route(&InputEvent::FocusLost, 0);
-
-    let up = |vk| ModEvent::Key { vk, down: false, repeat: false };
-    assert_eq!(
-        events(&mut manager, freecam),
-        vec![up(KEY_G), ModEvent::Keybind { action: fly_forward, phase: KeybindPhase::Released }]
-    );
-    assert!(events(&mut manager, headless).is_empty());
-}
-
-#[test]
-fn lease_end_after_focus_lost_runs_the_deferred_cleanup() {
-    let mut manager = manager();
-    let headless = headless_with_lease(&mut manager);
-    manager.send_key(headless, KEY_W, true).expect("claims Input");
-    manager.route(&key(KEY_G, true, NO_MODS), 0);
-    manager.route(&InputEvent::FocusLost, 0);
-    fake_ops(&mut manager);
-    events(&mut manager, headless);
-
-    manager.release(headless, Capability::Input);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_up(KEY_W)]);
-    let seen = events(&mut manager, headless);
-    assert!(seen.contains(&ModEvent::Key { vk: KEY_G, down: false, repeat: false }));
-    assert!(seen.contains(&ModEvent::FakeKeysReleased));
-    manager.acquire(headless, Capability::Input, 0).expect("known");
-    assert!(!manager.key_down(headless, KEY_G));
-}
-
-#[test]
-fn lease_release_sends_ups_for_the_holders_fake_keys() {
-    let mut manager = manager();
-    let headless = headless_with_lease(&mut manager);
-    manager.send_key(headless, KEY_W, true).expect("claims Input");
-    fake_ops(&mut manager);
-
-    manager.release(headless, Capability::Input);
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_up(KEY_W)]);
-    assert!(events(&mut manager, headless).contains(&ModEvent::FakeKeysReleased));
-}
-
-fn pointer_ops(manager: &mut ManagerService) -> Vec<PointerOp> {
-    let mut out = Vec::new();
-    manager.take_fake_pointer(&mut out);
-    out
-}
-
-fn left(down: bool) -> PointerOp {
-    PointerOp::Button { button: PointerButton::Left, down }
-}
-
-#[test]
-fn send_pointer_queues_button_and_wheel_ops() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-
-    manager.send_pointer(m, left(true)).expect("claims Input");
-    manager.send_pointer(m, left(true)).expect("claims Input");
-    manager.send_pointer(m, PointerOp::Wheel { steps: -2 }).expect("claims Input");
-    manager.send_pointer(m, left(false)).expect("claims Input");
-
-    assert_eq!(pointer_ops(&mut manager), vec![left(true), PointerOp::Wheel { steps: -2 }, left(false)]);
-}
-
-#[test]
-fn send_pointer_needs_an_input_claim() {
-    let mut manager = manager();
-    let m = register(&mut manager, &descriptor("plain", &[("Hud", "Shared")], ""), "plain");
-
-    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::NotPermitted));
-    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::NotPermitted));
-    assert!(pointer_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn send_pointer_wheel_past_the_step_limit_is_invalid() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    let limit = amm_core::services::input::FakePointer::MAX_WHEEL_STEPS;
-
-    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: limit + 1 }), Err(ManagerError::InvalidArgument));
-    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: -limit - 1 }), Err(ManagerError::InvalidArgument));
-    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 0 }), Ok(()));
-    assert!(pointer_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn send_pointer_is_refused_while_the_panel_is_open() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.set_panel_open(true);
-
-    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::NotPermitted));
-    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::NotPermitted));
-    assert!(pointer_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn send_pointer_is_refused_while_another_mod_holds_input() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_pointer(m, left(true)).expect("claims Input");
-    let other = register(&mut manager, &input_holder("other", "Shared", false), "other");
-    manager.acquire(other, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
-    pointer_ops(&mut manager);
-
-    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::NotPermitted));
-    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::NotPermitted));
-    assert_eq!(manager.send_pointer(m, left(false)), Ok(()));
-    assert!(pointer_ops(&mut manager).is_empty());
-}
-
-fn turn(axis: TurnAxis, millidegrees: i32) -> PointerOp {
-    PointerOp::Turn { axis, millidegrees }
-}
-
-#[test]
-fn a_turn_from_the_holder_is_queued() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-
-    manager.send_pointer(m, turn(TurnAxis::Yaw, 1500)).expect("claims Input");
-    manager.send_pointer(m, turn(TurnAxis::Pitch, -500)).expect("claims Input");
-    manager.send_pointer(m, turn(TurnAxis::Yaw, 0)).expect("a zero turn sends nothing");
-
-    assert_eq!(pointer_ops(&mut manager), vec![turn(TurnAxis::Pitch, -500), turn(TurnAxis::Yaw, 1500)]);
-}
-
-#[test]
-fn a_turn_from_a_mod_without_the_input_claim_is_refused() {
-    let mut manager = manager();
-    let m = register(&mut manager, &descriptor("plain", &[("Hud", "Shared")], ""), "plain");
-
-    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, 1000)), Err(ManagerError::NotPermitted));
-    assert!(pointer_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn a_turn_past_the_bound_is_refused() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    let limit = amm_core::services::input::FakePointer::MAX_TURN_MILLIDEGREES;
-
-    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, limit + 1)), Err(ManagerError::InvalidArgument));
-    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Pitch, -limit - 1)), Err(ManagerError::InvalidArgument));
-    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, i32::MIN)), Err(ManagerError::InvalidArgument));
-    assert!(pointer_ops(&mut manager).is_empty());
-    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, limit)), Ok(()));
-    assert_eq!(pointer_ops(&mut manager), vec![turn(TurnAxis::Yaw, limit)]);
-}
-
-#[test]
-fn a_turn_is_refused_while_another_mod_holds_input() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    let other = register(&mut manager, &input_holder("other", "Shared", false), "other");
-    manager.acquire(other, Capability::Input, 0).unwrap_or_else(|error| panic!("acquire: {error}"));
-
-    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, 1000)), Err(ManagerError::NotPermitted));
-    assert!(pointer_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn held_buttons_are_released_when_the_panel_opens() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_pointer(m, left(true)).expect("claims Input");
-
-    manager.set_panel_open(true);
-
-    assert_eq!(pointer_ops(&mut manager), vec![left(true), left(false)]);
-    assert!(events(&mut manager, m).contains(&ModEvent::FakeKeysReleased));
-}
-
-#[test]
-fn held_buttons_are_released_when_the_world_is_left_or_the_mod_unregisters() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_pointer(m, left(true)).expect("claims Input");
-    manager.world_left();
-    assert_eq!(pointer_ops(&mut manager), vec![left(true), left(false)]);
-
-    manager.send_pointer(m, left(true)).expect("claims Input");
-    manager.unregister(m);
-
-    assert_eq!(pointer_ops(&mut manager), vec![left(true), left(false)]);
-}
-
-#[test]
-fn focus_lost_under_full_block_keeps_the_holders_buttons_until_the_lease_ends() {
-    let mut manager = manager();
-    let headless = headless_with_lease(&mut manager);
-    manager.send_pointer(headless, left(true)).expect("claims Input");
-    pointer_ops(&mut manager);
-
-    manager.route(&InputEvent::FocusLost, 0);
-    assert!(pointer_ops(&mut manager).is_empty());
-
-    manager.release(headless, Capability::Input);
-
-    assert_eq!(pointer_ops(&mut manager), vec![left(false)]);
-    assert!(events(&mut manager, headless).contains(&ModEvent::FakeKeysReleased));
-}
-
-#[test]
-fn focus_lost_without_full_block_releases_held_buttons() {
-    let mut manager = manager();
-    let m = toggles_with_lease(&mut manager);
-    manager.send_pointer(m, left(true)).expect("claims Input");
-
-    manager.route(&InputEvent::FocusLost, 0);
-
-    assert_eq!(pointer_ops(&mut manager), vec![left(true), left(false)]);
-}
-
-#[test]
-fn pointer_drops_are_counted_once() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    for _ in 0..=amm_core::services::input::FakePointer::CAPACITY {
-        manager.send_pointer(m, PointerOp::Wheel { steps: 1 }).expect("claims Input");
-    }
-
-    assert_eq!(manager.take_pointer_drops(), 1);
-    assert_eq!(manager.take_pointer_drops(), 0);
-}
-
-#[test]
-fn send_pointer_into_a_queue_full_of_button_ops_is_refused() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    for _ in 0..amm_core::services::input::FakePointer::CAPACITY / 2 {
-        manager.send_pointer(m, left(true)).expect("claims Input");
-        manager.send_pointer(m, left(false)).expect("claims Input");
-    }
-
-    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::PointerQueueFull));
-    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::PointerQueueFull));
-    assert_eq!(pointer_ops(&mut manager).len(), amm_core::services::input::FakePointer::CAPACITY);
-}
-
-#[test]
-fn send_pointer_without_a_mouse_device_is_not_ready_for_a_press() {
-    let mut manager = manager_without_pointer_feed();
-    let m = toggles(&mut manager);
-
-    assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::NotReady));
-    assert_eq!(manager.send_pointer(m, PointerOp::Wheel { steps: 1 }), Err(ManagerError::NotReady));
-    assert_eq!(manager.send_pointer(m, left(false)), Ok(()));
-    assert_eq!(manager.send_pointer(m, turn(TurnAxis::Yaw, 500)), Ok(()));
-    assert_eq!(pointer_ops(&mut manager), vec![turn(TurnAxis::Yaw, 500)]);
-
-    manager.set_pointer_feed_ready(true);
-
-    assert_eq!(manager.send_pointer(m, left(true)), Ok(()));
-    assert_eq!(pointer_ops(&mut manager), vec![left(true)]);
-}
-
-#[test]
-fn the_no_mouse_device_condition_is_logged_once() {
-    LogCapture::install();
-    let mut manager = manager_without_pointer_feed();
-    let m = toggles(&mut manager);
-
-    for _ in 0..3 {
-        assert_eq!(manager.send_pointer(m, left(true)), Err(ManagerError::NotReady));
-    }
-    assert_eq!(LogCapture::count(ManagerService::NO_POINTER_FEED_LINE), 1);
-
-    manager.set_pointer_feed_ready(true);
-    manager.set_pointer_feed_ready(false);
-    manager.send_pointer(m, left(true)).expect_err("no mouse device again");
-    manager.send_pointer(m, PointerOp::Wheel { steps: -1 }).expect_err("no mouse device again");
-
-    assert_eq!(LogCapture::count(ManagerService::NO_POINTER_FEED_LINE), 2);
-}
-
-fn button(down: bool) -> InputEvent {
-    InputEvent::PointerButton { button: 0, down, x: 1.0, y: 1.0 }
-}
-
-#[test]
-fn keys_and_buttons_the_game_saw_go_up_on_the_fake_path_when_the_block_starts() {
-    let mut manager = manager();
-    let headless = register(&mut manager, HEADLESS, "headless");
-    assert!(!manager.route(&key(KEY_W, true, NO_MODS), 0).consume_from_game);
-    assert!(!manager.route(&button(true), 0).consume_from_game);
-
-    manager.acquire(headless, Capability::Input, 0).expect("known");
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_up(KEY_W)]);
-    assert_eq!(pointer_ops(&mut manager), vec![left(false)]);
-    let repeat = InputEvent::Key { vk: KEY_W, down: true, repeat: true, mods: NO_MODS };
-    assert!(manager.route(&repeat, 0).consume_from_game);
-    assert!(manager.route(&key(KEY_W, false, NO_MODS), 0).consume_from_game);
-    assert!(manager.route(&button(false), 0).consume_from_game);
-}
-
-#[test]
-fn a_key_a_mod_fakes_gets_no_game_up_when_the_block_starts_and_its_real_up_stays_kept() {
-    let mut manager = manager();
-    let m = toggles(&mut manager);
-    manager.send_key(m, KEY_W, true).expect("claims Input");
-    manager.route(&key(KEY_W, true, NO_MODS), 0);
-    fake_ops(&mut manager);
-    let headless = register(&mut manager, HEADLESS, "headless");
-
-    manager.acquire(headless, Capability::Input, 0).expect("known");
-
-    assert_eq!(fake_ops(&mut manager), vec![fake_up(KEY_W)]);
-    assert!(manager.route(&key(KEY_W, false, NO_MODS), 0).consume_from_game);
-}
-
-#[test]
-fn a_real_key_pressed_during_the_block_stays_from_the_game_after_the_lease_ends() {
-    let mut manager = manager();
-    let headless = headless_with_lease(&mut manager);
-    assert!(manager.route(&key(KEY_G, true, NO_MODS), 0).consume_from_game);
-
-    manager.release(headless, Capability::Input);
-
-    assert!(manager.route(&key(KEY_G, false, NO_MODS), 0).consume_from_game);
-    manager.acquire(headless, Capability::Input, 0).expect("known");
-    assert!(!manager.key_down(headless, KEY_G));
-    assert!(fake_ops(&mut manager).is_empty());
-}
-
-#[test]
-fn disabling_the_holder_after_focus_lost_runs_the_deferred_cleanup() {
-    let mut manager = manager();
-    let freecam = register(&mut manager, FREECAM, "freecam");
-    let headless = headless_with_lease(&mut manager);
-    manager.send_pointer(headless, left(true)).expect("claims Input");
-    manager.route(&key(KEY_G, true, NO_MODS), 0);
-    manager.route(&InputEvent::FocusLost, 0);
-    pointer_ops(&mut manager);
-
-    manager.set_enabled(headless, false);
-
-    assert_eq!(pointer_ops(&mut manager), vec![left(false)]);
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
-    assert!(!manager.key_down(freecam, KEY_G));
-    assert!(!manager.route(&InputEvent::FocusLost, 0).consume_from_game);
-}
-
-#[test]
-fn unregistering_the_holder_after_focus_lost_runs_the_deferred_cleanup() {
-    let mut manager = manager();
-    let freecam = register(&mut manager, FREECAM, "freecam");
-    let headless = headless_with_lease(&mut manager);
-    manager.send_pointer(headless, left(true)).expect("claims Input");
-    manager.route(&key(KEY_G, true, NO_MODS), 0);
-    manager.route(&InputEvent::FocusLost, 0);
-    pointer_ops(&mut manager);
-
-    manager.unregister(headless);
-
-    assert_eq!(pointer_ops(&mut manager), vec![left(false)]);
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
-    assert!(!manager.key_down(freecam, KEY_G));
-    assert!(!manager.route(&InputEvent::FocusLost, 0).consume_from_game);
-}
-
-#[test]
-fn the_end_of_a_block_with_a_kept_focus_loss_owes_the_game_one_focus_loss() {
-    let mut manager = manager();
-    let headless = headless_with_lease(&mut manager);
-    manager.route(&InputEvent::FocusLost, 0);
-    assert!(!manager.take_focus_loss_owed());
-
-    manager.release(headless, Capability::Input);
-
-    assert!(manager.take_focus_loss_owed());
-    assert!(!manager.take_focus_loss_owed());
-}
-
-#[test]
-fn the_end_of_a_block_without_a_kept_focus_loss_owes_nothing() {
-    let mut manager = manager();
-    let headless = headless_with_lease(&mut manager);
-
-    manager.release(headless, Capability::Input);
-
-    assert!(!manager.take_focus_loss_owed());
-}
-
-#[test]
-fn a_focus_loss_the_game_sees_after_the_block_clears_the_owed_one() {
-    let mut manager = manager();
-    let headless = headless_with_lease(&mut manager);
-    manager.route(&InputEvent::FocusLost, 0);
-    manager.release(headless, Capability::Input);
-
-    assert!(!manager.route(&InputEvent::FocusLost, 0).consume_from_game);
-
-    assert!(!manager.take_focus_loss_owed());
-}
-
-#[test]
-fn the_player_turn_is_blocked_while_a_full_block_holder_is_active() {
-    let mut manager = manager();
-    let headless = register(&mut manager, HEADLESS, "headless");
-    assert!(!manager.snapshot().blocks_player_turn);
-
-    manager.acquire(headless, Capability::Input, 0).expect("known");
-    assert!(manager.snapshot().blocks_player_turn);
-
-    manager.release(headless, Capability::Input);
-    assert!(!manager.snapshot().blocks_player_turn);
-}
-
-fn walk() -> MoveIntent {
-    MoveIntent { forward: 1.0, ..MoveIntent::ZERO }
-}
-
-// The game has the move entries and a local player in a world.
-fn move_ready(manager: &mut ManagerService) {
-    manager.set_move_available(true);
-    manager.set_player_ready(true);
-}
-
-fn released_count(manager: &mut ManagerService, index: ModIndex) -> usize {
-    events(manager, index).iter().filter(|event| **event == ModEvent::FakeKeysReleased).count()
-}
-
-#[test]
-fn a_move_intent_needs_the_input_lease() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let claimed = toggles(&mut manager);
-    let unclaimed = register(&mut manager, &descriptor("plain", &[], ""), "plain");
-
-    assert_eq!(manager.send_move(unclaimed, walk()), Err(ManagerError::NotPermitted));
-    assert_eq!(manager.send_move(claimed, walk()), Err(ManagerError::NotPermitted));
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-
-    manager.acquire(claimed, Capability::Input, 0).expect("known");
-    assert_eq!(manager.send_move(claimed, walk()), Ok(()));
-    assert_eq!(manager.move_intent(), walk());
-}
-
-#[test]
-fn a_move_intent_is_refused_while_the_panel_is_open() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    manager.set_panel_open(true);
-
-    assert_eq!(manager.send_move(m, walk()), Err(ManagerError::NotPermitted));
-}
-
-#[test]
-fn a_move_intent_past_one_or_not_a_number_is_invalid() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-
-    let past = MoveIntent { forward: 1.5, ..MoveIntent::ZERO };
-    assert_eq!(manager.send_move(m, past), Err(ManagerError::InvalidArgument));
-    let past_left = MoveIntent { left: -1.01, ..MoveIntent::ZERO };
-    assert_eq!(manager.send_move(m, past_left), Err(ManagerError::InvalidArgument));
-    let nan = MoveIntent { left: f32::NAN, ..MoveIntent::ZERO };
-    assert_eq!(manager.send_move(m, nan), Err(ManagerError::InvalidArgument));
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-}
-
-#[test]
-fn a_zero_intent_is_always_accepted() {
-    let mut manager = manager();
-    let unclaimed = register(&mut manager, &descriptor("plain", &[], ""), "plain");
-    let m = toggles(&mut manager);
-    manager.set_panel_open(true);
-
-    assert_eq!(manager.send_move(unclaimed, MoveIntent::ZERO), Ok(()));
-    assert_eq!(manager.send_move(m, MoveIntent::ZERO), Ok(()));
-}
-
-#[test]
-fn a_zero_intent_clears_the_own_intent_with_no_event() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    manager.send_move(m, walk()).expect("holds Input");
-
-    manager.send_move(m, MoveIntent::ZERO).expect("zero is always accepted");
-
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-    assert_eq!(released_count(&mut manager, m), 0);
-}
-
-#[test]
-fn send_move_without_recipes_is_unsupported() {
-    let mut manager = manager();
-    manager.set_player_ready(true);
-    let m = toggles_with_lease(&mut manager);
-
-    assert_eq!(manager.send_move(m, walk()), Err(ManagerError::Unsupported));
-    assert_eq!(manager.send_move(m, MoveIntent::ZERO), Ok(()));
-}
-
-#[test]
-fn send_move_without_a_local_player_is_not_ready() {
-    let mut manager = manager();
-    manager.set_move_available(true);
-    let m = toggles_with_lease(&mut manager);
-
-    assert_eq!(manager.send_move(m, walk()), Err(ManagerError::NotReady));
-
-    manager.set_player_ready(true);
-    assert_eq!(manager.send_move(m, walk()), Ok(()));
-}
-
-#[test]
-fn the_intent_clears_when_the_lease_ends() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    manager.send_move(m, walk()).expect("holds Input");
-
-    manager.release(m, Capability::Input);
-
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-    assert_eq!(released_count(&mut manager, m), 1);
-}
-
-#[test]
-fn the_intent_clears_when_the_panel_opens() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    manager.send_move(m, walk()).expect("holds Input");
-
-    manager.set_panel_open(true);
-
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-    assert_eq!(released_count(&mut manager, m), 1);
-}
-
-#[test]
-fn the_intent_clears_on_world_leave() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    manager.send_move(m, walk()).expect("holds Input");
-
-    manager.world_left();
-
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-    assert_eq!(released_count(&mut manager, m), 1);
-    assert_eq!(manager.send_move(m, walk()), Err(ManagerError::NotReady));
-}
-
-#[test]
-fn the_intent_clears_when_another_mod_gains_input() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    let freecam = register(&mut manager, FREECAM, "freecam");
-    manager.send_move(m, walk()).expect("holds Input");
-
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
-
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-    assert_eq!(released_count(&mut manager, m), 1);
-}
-
-#[test]
-fn the_intent_clears_on_focus_loss_unless_the_owner_keeps_it_under_full_block() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    manager.send_move(m, walk()).expect("holds Input");
-    manager.route(&InputEvent::FocusLost, 0);
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-    manager.unregister(m);
-
-    let headless = headless_with_lease(&mut manager);
-    manager.send_move(headless, walk()).expect("holds Input");
-    manager.route(&InputEvent::FocusLost, 0);
-
-    assert_eq!(manager.move_intent(), walk());
-}
-
-#[test]
-fn the_intent_clears_when_the_owner_is_disabled_or_unregisters() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    manager.send_move(m, walk()).expect("holds Input");
-    manager.set_enabled(m, false);
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-
-    manager.set_enabled(m, true);
-    manager.acquire(m, Capability::Input, 0).expect("known");
-    manager.send_move(m, walk()).expect("holds Input");
-    manager.unregister(m);
-
-    assert_eq!(manager.move_intent(), MoveIntent::ZERO);
-}
-
-#[test]
-fn the_clear_event_is_sent_once() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    manager.send_key(m, KEY_W, true).expect("claims Input");
-    manager.send_move(m, walk()).expect("holds Input");
-
-    manager.set_panel_open(true);
-    manager.set_panel_open(false);
-    manager.release(m, Capability::Input);
-    manager.world_left();
-
-    assert_eq!(released_count(&mut manager, m), 1);
-}
-
-#[test]
-fn a_second_holder_takes_the_intent_and_the_first_is_told() {
-    let mut manager = manager();
-    move_ready(&mut manager);
-    let m = toggles_with_lease(&mut manager);
-    let freecam = register(&mut manager, FREECAM, "freecam");
-    manager.acquire(freecam, Capability::Input, 0).expect("known");
-    events(&mut manager, m);
-    let sneak = MoveIntent { sneak: true, ..MoveIntent::ZERO };
-    manager.send_move(m, walk()).expect("holds Input");
-
-    manager.send_move(freecam, sneak).expect("holds Input");
-
-    assert_eq!(manager.move_intent(), sneak);
-    assert_eq!(released_count(&mut manager, m), 1);
 }

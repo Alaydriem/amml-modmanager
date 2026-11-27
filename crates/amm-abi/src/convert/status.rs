@@ -1,4 +1,4 @@
-use amm_core::errors::{CaptureError, DescriptorError, IconError, LinkError, ManagerError, RegistryError, StoreError};
+use amm_core::errors::{DescriptorError, IconError, LinkError, ManagerError, RegistryError, StoreError};
 
 use crate::types::AmmStatus;
 
@@ -31,22 +31,6 @@ impl From<&ManagerError> for AmmStatus {
             ManagerError::MenuEntryLimit => AmmStatus::QueueFull,
             ManagerError::RenderSizeOutOfRange => AmmStatus::InvalidArgument,
             ManagerError::RenderSizeClosed => AmmStatus::NotPermitted,
-            ManagerError::InvalidArgument => AmmStatus::InvalidArgument,
-            ManagerError::PointerQueueFull => AmmStatus::QueueFull,
-            ManagerError::Unsupported => AmmStatus::Unsupported,
-            ManagerError::NotReady => AmmStatus::NotReady,
-            ManagerError::KeyQueueFull => AmmStatus::Busy,
-        }
-    }
-}
-
-impl From<&CaptureError> for AmmStatus {
-    fn from(value: &CaptureError) -> Self {
-        match value {
-            CaptureError::UnknownMod => AmmStatus::UnknownHandle,
-            CaptureError::NotPermitted => AmmStatus::NotPermitted,
-            CaptureError::InvalidPath => AmmStatus::InvalidArgument,
-            CaptureError::Busy => AmmStatus::Busy,
         }
     }
 }
@@ -60,7 +44,7 @@ impl From<&IconError> for AmmStatus {
 impl From<AmmStatus> for LinkError {
     fn from(value: AmmStatus) -> Self {
         match value {
-            AmmStatus::ManagerMissing => LinkError::ManagerMissing,
+            AmmStatus::ManagerMissing => LinkError::NoManager,
             other => LinkError::Status(other as i32),
         }
     }
@@ -85,6 +69,7 @@ impl TryFrom<i32> for AmmStatus {
             11 => Ok(AmmStatus::ManagerMissing),
             12 => Ok(AmmStatus::Busy),
             13 => Ok(AmmStatus::NotReady),
+            14 => Ok(AmmStatus::Disabled),
             other => Err(other),
         }
     }

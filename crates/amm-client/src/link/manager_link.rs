@@ -1,83 +1,207 @@
-use std::ffi::c_void;
 use std::io::Read;
 use std::path::Path;
 
-use amm_abi::convert::move_intent::MoveIntentCodec;
-use amm_abi::convert::pointer_op::PointerOpCodec;
-use amm_abi::types::{
-    AmmCallbacks, AmmCapability, AmmHandle, AmmRenderSize, AmmRenderSizeState, AmmScreenshotLayers, AmmStatus,
-};
+use amm_abi::types::{AmmCapability, AmmHandle, AmmRenderSize, AmmRenderSizeState, AmmStatus};
 use amm_core::errors::LinkError;
 use amm_core::services::icon::IconDecoder;
 use amm_core::structs::capture::ScreenshotLayers;
-use amm_core::structs::descriptor::Capability;
+use amm_core::structs::descriptor::{Capability, Descriptor};
 use amm_core::structs::event::ModEvent;
-use amm_core::structs::input::{MoveIntent, PointerOp};
 use amm_core::structs::lease::AcquireOutcome;
 use amm_core::structs::manager::TextureGrant;
 use amm_core::structs::menu::{MenuEntryId, MenuScreens};
 use amm_core::structs::mesh::GamePicture;
 use amm_core::structs::render::{RenderSize, RenderSizeState};
 use amm_core::traits::AbiSized;
-use curia::{Dispatcher, InstallError, Level, Logger, TracingBridge};
+use amml_api::amml_abi::{
+    InjectedInputReleased, InputLeaseLost, InputLeaseResumed, InputLeaseSuspended, ModsLoaded, ProviderGone,
+    ProviderReady, ScreenshotTaken, ScreenshotWritten,
+};
+use amml_api::{
+    ApiError, CaptureRequest, CaptureStream, Ctx, Event, EventCtx, HookOrder, InjectedInputReleasedExt, KeyCode,
+    Listener, MoveIntent, ProviderGoneExt, ProviderReadyExt, ShotId, ShotLayers,
+};
 use serde::de::DeserializeOwned;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[cfg(feature = "egui")]
 use super::FrameHandler;
-use super::{ApiTable, CaptureStream, EventDrain, ForwardSink};
+use super::{EventDrain, FrameSlot, InputLink, LinkCell, LinkShared, LinkState, LogBridge, ManagerTables, PointerOp};
 #[cfg(feature = "egui")]
 use crate::bridge::{EguiFrame, FrameTrampoline, LocaleSlot};
 
-/// A mod's registration with the manager. A link made with a frame handler owns the boxed frame state the
-/// manager's callbacks use; a link without a frame owns no frame state. Drop unregisters, then frees the frame
-/// state when there is one.
+/// A mod's link to the manager through the loader's registry. `start` in `enable` adds the link's listeners; the
+/// link connects itself when the manager's tables are published (`ProviderReady`), registers the mod's descriptor
+/// with the mod's config folder, gives the manager the mod's layer callbacks, and keeps the descriptor's `Input`
+/// claim as one loader input lease. At the manager's `ProviderGone` the link unregisters and is gone; every call
+/// then gives `LinkError::Gone` and reaches no table. Drop removes the listeners, then unregisters.
+///
+/// Call it on the game thread. The link takes its lock only between calls, never during a loader or manager call, so a
+/// listener may call the link from inside an event the loader raises during one of the link's calls.
 pub struct ManagerLink {
-    table: ApiTable,
-    handle: AmmHandle,
-    // The frame state the callbacks take as `user`, null for a link without a frame
-    user: *mut c_void,
-    // Frees `user`; `None` for a link without a frame
-    free: Option<unsafe fn(*mut c_void)>,
-    drain: EventDrain,
-    sink: ForwardSink,
+    // Dropped first, so no listener runs while the link closes
+    listeners: Vec<Listener>,
+    cell: LinkCell,
     // The localizer the frame's layers read; a link without a frame has a slot no pass reads
     #[cfg(feature = "egui")]
     locale: LocaleSlot,
 }
 
-// SAFETY: the frame state behind `user`, when there is one, holds an `H: Send` and is reached only by the
-// manager's render callbacks and by `Drop`, which runs after unregister; the rest of the link is plain data and a
-// shared table
-unsafe impl Send for ManagerLink {}
-
 impl ManagerLink {
-    // The manager filters by its per-mod level, so the mod side forwards every level.
-    const LOG_LEVEL: Level = Level::Trace;
     // Room for the longest mod id the descriptor checker accepts, so one call is enough
     const HOLDER_ID_BYTES: usize = 64;
     // Room for a locale id such as `pt_BR` or `zh_Hant_TW`, so one call is enough
     const LOCALE_BYTES: usize = 16;
 
-    /// Registers the mod from its descriptor text, with `handler` as its egui pass, and installs Curia in this
-    /// DLL with a sink that forwards to the manager. Curia already being installed counts as success.
-    /// `config_dir` is the mod's own AMML config folder, an absolute path; the manager keeps the mod's
-    /// `config.hcl` there. A path that is not UTF-8 is `InvalidArgument`.
+    /// Starts a link for the mod of `ctx` with `descriptor_hcl` as its descriptor and `handler`, when given, as its
+    /// egui pass. Call it in `enable`: it adds the link's listeners and installs `LogBridge` over the mod's logger.
+    /// The link is `Waiting` until the manager's tables are published. A descriptor that does not parse is
+    /// `Json`; a listen of `ProviderReady` or `ProviderGone` the loader refuses is `Api`.
     #[cfg(feature = "egui")]
-    pub fn new<H: FrameHandler + Send + 'static>(
-        table: ApiTable,
+    pub fn start<H: FrameHandler + Send + 'static>(
+        ctx: &Ctx,
         descriptor_hcl: &'static str,
-        config_dir: &Path,
-        handler: H,
+        handler: Option<H>,
     ) -> Result<ManagerLink, LinkError> {
-        let frame = EguiFrame::new(handler);
-        let locale = frame.locale().clone();
-        let user = FrameTrampoline::<H>::into_user(frame);
-        let callbacks = FrameTrampoline::<H>::callbacks(user);
-        let mut link = Self::register(table, descriptor_hcl, config_dir, callbacks, Some(FrameTrampoline::<H>::free))?;
+        let mut locale = LocaleSlot::new();
+        let frame = handler.map(|handler| {
+            let frame = EguiFrame::new(handler);
+            locale = frame.locale().clone();
+            let user = FrameTrampoline::<H>::into_user(frame);
+            FrameSlot::new(FrameTrampoline::<H>::callbacks(user), FrameTrampoline::<H>::free)
+        });
+        let mut link = Self::begin(ctx, descriptor_hcl, frame)?;
         link.locale = locale;
         Ok(link)
+    }
+
+    /// `start` for a mod that draws nothing through the manager: no layer callbacks.
+    pub fn start_without_frame(ctx: &Ctx, descriptor_hcl: &'static str) -> Result<ManagerLink, LinkError> {
+        Self::begin(ctx, descriptor_hcl, None)
+    }
+
+    fn begin(ctx: &Ctx, descriptor_hcl: &'static str, frame: Option<FrameSlot>) -> Result<ManagerLink, LinkError> {
+        let parsed = hcl::from_str::<Descriptor>(descriptor_hcl)
+            .map_err(|error| LinkError::Json { reason: error.to_string() })
+            .and_then(|descriptor| Self::same_id(ctx, descriptor));
+        let descriptor = match parsed {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                if let Some(frame) = frame {
+                    // SAFETY: the manager never got the callbacks, so none runs with this state
+                    unsafe { frame.free() };
+                }
+                return Err(error);
+            }
+        };
+        LogBridge::install(ctx.log());
+        let input = InputLink::new(descriptor.input_claim().as_ref());
+        let cell = LinkCell::new(LinkShared::new(*ctx, descriptor_hcl, input, frame));
+        let mut link = Self {
+            listeners: Vec::new(),
+            cell,
+            #[cfg(feature = "egui")]
+            locale: LocaleSlot::new(),
+        };
+        link.listen_all(ctx)?;
+        // A manager whose tables are there already (a link started after `ModsLoaded`) gets no new `ProviderReady`
+        link.cell.try_connect();
+        Ok(link)
+    }
+
+    // The manager ranks input leases by descriptor id and the loader by its own mod id, so the two must be the same.
+    fn same_id(ctx: &Ctx, descriptor: Descriptor) -> Result<Descriptor, LinkError> {
+        let id = descriptor.id();
+        if id == ctx.module() {
+            return Ok(descriptor);
+        }
+        ctx.log().error(
+            "the descriptor names another mod than the loader's",
+            &[("descriptor", &id), ("module", ctx.module())],
+        );
+        Err(LinkError::IdMismatch { descriptor: id, module: ctx.module().to_owned() })
+    }
+
+    // On an error the link is dropped, which closes it and frees a frame state the manager never got.
+    fn listen_all(&mut self, ctx: &Ctx) -> Result<(), LinkError> {
+        self.listen::<ProviderReady>(ctx, true, |shared, event| {
+            if let Some(name) = event.name() {
+                shared.provider_ready(name);
+            }
+        })?;
+        self.listen::<ProviderGone>(ctx, true, |shared, event| {
+            if let Some(name) = event.name() {
+                shared.provider_gone(name);
+            }
+        })?;
+        self.listen::<ModsLoaded>(ctx, false, |shared, _| shared.mods_loaded())?;
+        self.listen::<InputLeaseSuspended>(ctx, false, |shared, event| {
+            if let Some(event) = EventDrain::suspended(event, shared.lease_id()) {
+                shared.push(event);
+            }
+        })?;
+        self.listen::<InputLeaseResumed>(ctx, false, |shared, event| {
+            if let Some(event) = EventDrain::resumed(event, shared.lease_id()) {
+                shared.push(event);
+            }
+        })?;
+        self.listen::<InputLeaseLost>(ctx, false, |shared, event| {
+            if let Some(event) = EventDrain::lost(event, shared.lease_id()) {
+                shared.input_lost();
+                shared.push(event);
+            }
+        })?;
+        self.listen::<InjectedInputReleased>(ctx, false, |shared, event| {
+            if let Some(released) = EventDrain::released(event, shared.lease_id()) {
+                shared.input_released(event.released_key(), event.released_button());
+                shared.push(released);
+            }
+        })?;
+        self.listen::<ScreenshotTaken>(ctx, false, |shared, event| {
+            if let Some(event) = EventDrain::taken(event) {
+                shared.push(event);
+            }
+        })?;
+        self.listen::<ScreenshotWritten>(ctx, false, |shared, event| {
+            if let Some(event) = EventDrain::written(event) {
+                shared.push(event);
+            }
+        })?;
+        Ok(())
+    }
+
+    // A listen of an event the loader does not serve is skipped when `needed` is false.
+    fn listen<E: Event>(
+        &mut self,
+        ctx: &Ctx,
+        needed: bool,
+        mut f: impl FnMut(&LinkCell, &E) + Send + 'static,
+    ) -> Result<(), LinkError> {
+        let cell = self.cell.clone();
+        let listened = ctx.events().listen::<E>(HookOrder::NORMAL, move |event: &mut E, _: &EventCtx| {
+            f(&cell, event);
+        });
+        match listened {
+            Ok(listener) => {
+                self.listeners.push(listener);
+                Ok(())
+            }
+            Err(ApiError::NotAvailable) if !needed => Ok(()),
+            Err(error) => Err(LinkError::Api(error)),
+        }
+    }
+
+    fn connection(&self) -> Result<(ManagerTables, AmmHandle), LinkError> {
+        self.cell.connection()
+    }
+
+    /// Where the link is with the manager.
+    pub fn state(&self) -> LinkState {
+        self.cell.state()
+    }
+
+    /// The loader's id of the input lease the link holds, as the lease events carry it; `None` without one.
+    pub fn input_lease_id(&self) -> Option<u64> {
+        self.cell.lease_id()
     }
 
     /// The localizer the mod's widgets resolve their text with, from the next pass on. Build it from `locale` at
@@ -93,132 +217,42 @@ impl ManagerLink {
         self.locale.get()
     }
 
-    /// Registers the mod from its descriptor text with no frame and no textures-lost callback, for a mod that
-    /// draws nothing through the manager. Logging, `config_dir` and errors are as for `new`. Drop unregisters and
-    /// frees nothing.
-    pub fn without_frame(
-        table: ApiTable,
-        descriptor_hcl: &'static str,
-        config_dir: &Path,
-    ) -> Result<ManagerLink, LinkError> {
-        let callbacks = AmmCallbacks::blank();
-        Self::register(table, descriptor_hcl, config_dir, callbacks, None)
-    }
-
-    // Registers with `callbacks` and installs logging. On any error the manager holds no copy of
-    // `callbacks.user`, so `free`, when given, frees it here once.
-    fn register(
-        table: ApiTable,
-        descriptor_hcl: &'static str,
-        config_dir: &Path,
-        callbacks: AmmCallbacks,
-        free: Option<unsafe fn(*mut c_void)>,
-    ) -> Result<ManagerLink, LinkError> {
-        let handle = match Self::register_handle(&table, descriptor_hcl, config_dir, &callbacks) {
-            Ok(handle) => handle,
-            Err(error) => {
-                if let Some(free) = free {
-                    // SAFETY: the manager refused the mod or was never called, so it holds no copy of user,
-                    // which is freed here once
-                    unsafe { free(callbacks.user) };
-                }
-                return Err(error);
-            }
-        };
-        let sink = ForwardSink::new(table, handle, Self::LOG_LEVEL);
-        Self::install_logging(&sink);
-        Ok(Self {
-            table,
-            handle,
-            user: callbacks.user,
-            free,
-            drain: EventDrain::new(),
-            sink,
-            #[cfg(feature = "egui")]
-            locale: LocaleSlot::new(),
-        })
-    }
-
-    fn register_handle(
-        table: &ApiTable,
-        descriptor_hcl: &'static str,
-        config_dir: &Path,
-        callbacks: &AmmCallbacks,
-    ) -> Result<AmmHandle, LinkError> {
-        let Some(register) = table.api().register else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        let Some(config_dir) = config_dir.to_str() else {
-            return Err(LinkError::from(AmmStatus::InvalidArgument));
-        };
-        let mut handle = AmmHandle { slot: u16::MAX, generation: u16::MAX };
-        // SAFETY: the descriptor text, the config folder text, the callbacks and the handle all live for the call;
-        // the manager copies the callbacks and writes the handle only on success
-        let status = unsafe {
-            register(
-                descriptor_hcl.as_ptr(),
-                descriptor_hcl.len(),
-                config_dir.as_ptr(),
-                config_dir.len(),
-                callbacks,
-                &mut handle,
-            )
-        };
-        match status {
-            AmmStatus::Ok => Ok(handle),
-            other => Err(LinkError::from(other)),
-        }
-    }
-
-    /// A forwarding sink for this mod's log events. It sends through the same handle as the link, and stops when
-    /// the link is dropped.
-    pub fn sink(&self) -> ForwardSink {
-        self.sink.clone()
-    }
-
-    /// Asks for a lease on `capability`.
+    /// Asks for a lease on `capability`. `Input` takes the loader input lease of the descriptor's `Input` claim
+    /// (`InputLink::acquire`); the other capabilities are the manager's leases.
     pub fn acquire(&self, capability: Capability) -> Result<AcquireOutcome, LinkError> {
-        let Some(acquire) = self.table.api().acquire else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        // SAFETY: acquire takes plain values; the handle is this link's until drop
-        let result = unsafe { acquire(self.handle, AmmCapability::from(capability) as u8) };
+        if capability == Capability::Input {
+            return self.cell.acquire_input();
+        }
+        let (tables, handle) = self.connection()?;
+        let acquire = tables.leases.acquire.ok_or(LinkError::from(AmmStatus::Unsupported))?;
+        let capability = AmmCapability::try_from(capability).map_err(LinkError::from)? as u8;
+        // SAFETY: acquire takes plain values; the handle is this link's until it unregisters
+        let result = unsafe { acquire(handle, capability) };
         Ok(AcquireOutcome::from(result))
     }
 
-    /// Gives a lease back.
+    /// Gives a lease back. `Input` lets go of every key and button the link holds and ends the input lease.
     pub fn release(&self, capability: Capability) {
-        if let Some(release) = self.table.api().release {
-            // SAFETY: release takes plain values; the handle is this link's until drop
-            unsafe { release(self.handle, AmmCapability::from(capability) as u8) };
+        if capability == Capability::Input {
+            self.cell.release_input();
+            return;
         }
+        let Ok((tables, handle)) = self.connection() else {
+            return;
+        };
+        let (Some(release), Ok(capability)) = (tables.leases.release, AmmCapability::try_from(capability)) else {
+            return;
+        };
+        // SAFETY: release takes plain values; the handle is this link's until it unregisters
+        unsafe { release(handle, capability as u8) };
     }
 
-    /// The language code the person picked in the manager: empty for English, `en_XA` for the pseudo-locale, or a
-    /// locale such as `ru`. Map it with `LocaleSetting::from_code`. After this call the mod gets
-    /// `ModEvent::LocaleChanged` when the code changes. `None` on a manager older than ABI 1.5, which has no
-    /// language setting: show English.
-    pub fn locale(&self) -> Option<String> {
-        let locale = self.table.api().locale?;
-        let mut buffer = [0u8; Self::LOCALE_BYTES];
-        // SAFETY: the buffer has room for its length in bytes for the call; the handle is this link's until drop
-        let len = unsafe { locale(self.handle, buffer.as_mut_ptr(), buffer.len()) } as usize;
-        if len <= buffer.len() {
-            return std::str::from_utf8(&buffer[..len]).ok().map(str::to_owned);
-        }
-        let mut long = vec![0u8; len];
-        // SAFETY: the buffer has room for its length in bytes for the call; the handle is this link's until drop
-        let again = unsafe { locale(self.handle, long.as_mut_ptr(), long.len()) } as usize;
-        if again > long.len() {
-            return None;
-        }
-        std::str::from_utf8(&long[..again]).ok().map(str::to_owned)
-    }
-
-    /// The id of the mod that holds `capability` now, or `None` when no mod holds it.
+    /// The id of the mod that holds the manager lease `capability` now; `None` when no mod holds it, for `Input`
+    /// (a loader lease), and while the link is not connected.
     pub fn holder(&self, capability: Capability) -> Option<String> {
-        let holder = self.table.api().holder?;
-        let capability = AmmCapability::from(capability) as u8;
+        let (tables, _) = self.connection().ok()?;
+        let holder = tables.leases.holder?;
+        let capability = AmmCapability::try_from(capability).ok()? as u8;
         let mut buffer = [0u8; Self::HOLDER_ID_BYTES];
         // SAFETY: the buffer has room for its length in bytes for the call
         let len = unsafe { holder(capability, buffer.as_mut_ptr(), buffer.len()) } as usize;
@@ -234,21 +268,68 @@ impl ManagerLink {
         Self::id_text(&long[..again])
     }
 
-    /// The events queued for this mod, in order. The iterator reads a reused buffer of `EventDrain::CAPACITY`
-    /// events; call again to drain the rest.
-    pub fn events(&mut self) -> impl Iterator<Item = ModEvent> + '_ {
-        self.drain.poll(&self.table, self.handle)
+    /// True when a mod other than this one holds the manager lease `capability` now. False for `Input` and while
+    /// the link is not connected. Call it on the game thread: from a frame callback the host is busy and the answer
+    /// is false.
+    pub fn held_by_other(&self, capability: Capability) -> bool {
+        let Ok((tables, handle)) = self.connection() else {
+            return false;
+        };
+        let (Some(held_by_other), Ok(capability)) = (tables.leases.held_by_other, AmmCapability::try_from(capability))
+        else {
+            return false;
+        };
+        // SAFETY: held_by_other takes plain values; the handle is this link's until it unregisters
+        unsafe { held_by_other(handle, capability as u8) == 1 }
+    }
+
+    /// The manager events and the loader events the link passes on (input lease, injected release, screenshots,
+    /// `ManagerGone`), in arrival order. A cancelled loader event is not passed on.
+    pub fn events(&mut self) -> impl Iterator<Item = ModEvent> {
+        self.cell.take_events().into_iter()
+    }
+
+    /// The language code the person picked in the manager: empty for English, `en_XA` for the pseudo-locale, or a
+    /// locale such as `ru`. After this call the mod gets `ModEvent::LocaleChanged` when the code changes. `None`
+    /// while the link is not connected.
+    pub fn locale(&self) -> Option<String> {
+        let (tables, handle) = self.connection().ok()?;
+        let locale = tables.core.locale?;
+        let mut buffer = [0u8; Self::LOCALE_BYTES];
+        // SAFETY: the buffer has room for its length in bytes for the call; the handle is this link's
+        let len = unsafe { locale(handle, buffer.as_mut_ptr(), buffer.len()) } as usize;
+        if len <= buffer.len() {
+            return std::str::from_utf8(&buffer[..len]).ok().map(str::to_owned);
+        }
+        let mut long = vec![0u8; len];
+        // SAFETY: the buffer has room for its length in bytes for the call; the handle is this link's
+        let again = unsafe { locale(handle, long.as_mut_ptr(), long.len()) } as usize;
+        if again > long.len() {
+            return None;
+        }
+        std::str::from_utf8(&long[..again]).ok().map(str::to_owned)
+    }
+
+    /// True while the manager panel is open. False while the link is not connected.
+    pub fn panel_open(&self) -> bool {
+        let Ok((tables, _)) = self.connection() else {
+            return false;
+        };
+        let Some(panel_open) = tables.core.panel_open else {
+            return false;
+        };
+        // SAFETY: panel_open takes no arguments
+        unsafe { panel_open() == 1 }
     }
 
     /// The mod's checked `config.hcl` parsed into its own type.
     pub fn config<T: DeserializeOwned>(&self) -> Result<T, LinkError> {
-        let Some(config_document) = self.table.api().config_document else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
+        let (tables, handle) = self.connection()?;
+        let config_document = tables.settings.config_document.ok_or(LinkError::from(AmmStatus::Unsupported))?;
         let mut ptr = std::ptr::null();
         let mut len = 0;
-        // SAFETY: both out pointers live for the call; the handle is this link's until drop
-        let status = unsafe { config_document(self.handle, &mut ptr, &mut len) };
+        // SAFETY: both out pointers live for the call; the handle is this link's
+        let status = unsafe { config_document(handle, &mut ptr, &mut len) };
         if status != AmmStatus::Ok {
             return Err(LinkError::from(status));
         }
@@ -264,339 +345,150 @@ impl ManagerLink {
 
     /// Changes one of the mod's own saved values at `path`.
     pub fn set_setting(&self, path: &str, value: &hcl::Value) -> Result<(), LinkError> {
-        let Some(set_setting) = self.table.api().set_setting else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
+        let (tables, handle) = self.connection()?;
+        let set_setting = tables.settings.set_setting.ok_or(LinkError::from(AmmStatus::Unsupported))?;
         let expression =
             hcl::format::to_string(value).map_err(|error| LinkError::Json { reason: error.to_string() })?;
-        // SAFETY: path and the expression text live for the call; the handle is this link's until drop
-        let status =
-            unsafe { set_setting(self.handle, path.as_ptr(), path.len(), expression.as_ptr(), expression.len()) };
-        match status {
-            AmmStatus::Ok => Ok(()),
-            other => Err(LinkError::from(other)),
-        }
+        // SAFETY: path and the expression text live for the call; the handle is this link's
+        let status = unsafe { set_setting(handle, path.as_ptr(), path.len(), expression.as_ptr(), expression.len()) };
+        Self::check(status)
     }
 
-    /// Whether `vk` is down. The manager answers only while this mod holds the `Input` lease.
-    pub fn key_down(&self, vk: u32) -> bool {
-        match self.table.api().key_down {
-            // SAFETY: key_down takes plain values; the handle is this link's until drop
-            Some(key_down) => unsafe { key_down(self.handle, vk) },
-            None => false,
-        }
+    /// Holds the game key `key` down (`down`) or lets it go, through the input lease. A second down of a held key
+    /// and an up of a key not held change nothing. Without the lease (`acquire(Capability::Input)`) or while it is
+    /// suspended `Api(Refused)`. When the loader lets go of the keys itself, the mod gets
+    /// `ModEvent::FakeKeysReleased`.
+    pub fn send_key(&self, key: KeyCode, down: bool) -> Result<(), LinkError> {
+        self.cell.send_key(key, down)
     }
 
-    /// Sets the keys this mod wants `ModEvent` key reports for, replacing the earlier set; an empty slice clears
-    /// it. The mod must hold the `Input` lease: `NotPermitted` otherwise. More than 32 keys or a key above 255 is
-    /// `InvalidArgument`. A manager older than ABI 2.1 is `Unsupported`.
-    pub fn watch_keys(&self, vks: &[u32]) -> Result<(), LinkError> {
-        let Some(watch_keys) = self.table.api().watch_keys else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        // SAFETY: the key slice lives for the call and the manager copies what it keeps; the handle is this
-        // link's until drop
-        let status = unsafe { watch_keys(self.handle, vks.as_ptr(), vks.len()) };
-        match status {
-            AmmStatus::Ok => Ok(()),
-            other => Err(LinkError::from(other)),
-        }
-    }
-
-    /// Holds the game key `vk` down (`down`) or lets it go. The mod must hold the `Input` lease: `NotPermitted`
-    /// otherwise, and while the panel is open or another mod holds `Input`. A key above 255 is `InvalidArgument`.
-    /// When the manager lets go of a held key itself, the mod gets `ModEvent::FakeKeysReleased`. A manager older
-    /// than ABI 2.1 is `Unsupported`. A down is `LinkError::Status(13)` (`NotReady`) while the manager does not yet
-    /// know the game's keyboard controller, and `LinkError::Status(12)` (`Busy`) while its key queue is full.
-    pub fn send_key(&self, vk: u32, down: bool) -> Result<(), LinkError> {
-        let Some(send_key) = self.table.api().send_key else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        // SAFETY: send_key takes plain values; the handle is this link's until drop
-        let status = unsafe { send_key(self.handle, vk, u8::from(down)) };
-        match status {
-            AmmStatus::Ok => Ok(()),
-            other => Err(LinkError::from(other)),
-        }
-    }
-
-    /// Holds a game mouse button down, lets it go, turns the wheel by `steps` notches (positive away from the
-    /// player), or turns the player's look on one axis (`PointerOp::Turn`, in millidegrees). The rules of `send_key`
-    /// apply: the mod must hold the `Input` lease, `NotPermitted` otherwise, and while the panel is open or another
-    /// mod holds `Input`. A wheel turn past 32 notches either way, or a look turn past 360000 millidegrees either
-    /// way, is `InvalidArgument`. The manager adds the look turns of one axis into one pending value, held to
-    /// 360000 either way, and applies it once per client update (a frame). A manager queue full of button actions
-    /// is `QueueFull`, and nothing changes. From ABI 2.4, a button down or a wheel turn is `NotReady` while the
-    /// manager does not yet know the game's mouse device. When the manager lets go of a held button itself, the mod gets
-    /// `ModEvent::FakeKeysReleased`. A manager older than ABI 2.2 is `Unsupported`. A manager of ABI 2.2 answers
-    /// `InvalidArgument` to the look turns; they need ABI 2.3.
+    /// Holds a mouse button down or lets it go, turns the wheel, or turns the view, through the input lease, under
+    /// the rules of `send_key`.
     pub fn send_pointer(&self, op: PointerOp) -> Result<(), LinkError> {
-        let Some(send_pointer) = self.table.api().send_pointer else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        let (code, value) = PointerOpCodec::encode(op);
-        // SAFETY: send_pointer takes plain values; the handle is this link's until drop
-        let status = unsafe { send_pointer(self.handle, code, value) };
-        match status {
-            AmmStatus::Ok => Ok(()),
-            other => Err(LinkError::from(other)),
-        }
+        self.cell.send_pointer(op)
     }
 
-    /// Holds a movement of the local player with no keyboard, until the next call: `forward` and `left` from -1.0
-    /// to 1.0 (positive is forward and to the left), and jump, sneak and sprint held while set, whatever the
-    /// player's toggle options say. `MoveIntent::ZERO` is the clear and is always `Ok`; the game's own keys work
-    /// again on the next tick. Any other intent needs the active `Input` lease and a closed panel, else
-    /// `NotPermitted`; it is `NotReady` while the game has no local player in a world, and `InvalidArgument` for an
-    /// axis outside -1.0 to 1.0. A manager older than ABI 2.4, or one whose game has no move entries, is
-    /// `Unsupported`, so the mod can fall back to `send_key`. When the manager clears the intent itself (the lease
-    /// ends, another mod gains `Input` or sets an intent, the panel opens, focus is lost, the world is left), the
-    /// mod gets `ModEvent::FakeKeysReleased`.
+    /// Holds a movement of the local player until the next call. The all-zero intent clears it and is always `Ok`;
+    /// any other intent needs the input lease, under the rules of `send_key`.
     pub fn send_move(&self, intent: MoveIntent) -> Result<(), LinkError> {
-        let Some(send_move) = self.table.api().send_move else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        let (forward_milli, left_milli, flags) = MoveIntentCodec::encode(intent);
-        // SAFETY: send_move takes plain values; the handle is this link's until drop
-        let status = unsafe { send_move(self.handle, forward_milli, left_milli, flags) };
-        match status {
-            AmmStatus::Ok => Ok(()),
-            other => Err(LinkError::from(other)),
-        }
+        self.cell.send_move(intent)
     }
 
     /// Turns the cursor mode on or off.
     pub fn set_cursor_mode(&self, on: bool) -> Result<(), LinkError> {
-        let Some(set_cursor_mode) = self.table.api().set_cursor_mode else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        // SAFETY: set_cursor_mode takes plain values; the handle is this link's until drop
-        unsafe { set_cursor_mode(self.handle, u8::from(on)) };
+        let (tables, handle) = self.connection()?;
+        let set_cursor_mode = tables.layers.set_cursor_mode.ok_or(LinkError::from(AmmStatus::Unsupported))?;
+        // SAFETY: set_cursor_mode takes plain values; the handle is this link's
+        unsafe { set_cursor_mode(handle, u8::from(on)) };
         Ok(())
     }
 
-    /// Asks for a game-only screenshot of the next Present, taken before any mod layer, written as a PNG to `path`,
-    /// and returns its sequence, which the `ScreenshotTaken` and `ScreenshotWritten` events carry. `path` is an
-    /// absolute `.png` file path whose parent folder exists; the mod must hold an active `Hud` or `Overlay` lease.
-    /// A path that is not UTF-8 is `InvalidArgument`; a manager older than ABI 1.2 is `Unsupported`.
-    pub fn request_screenshot(&self, path: &Path) -> Result<u32, LinkError> {
-        let Some(request_screenshot) = self.table.api().request_screenshot else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
+    /// Asks the loader for a PNG of the next frame with a surface at `path` (absolute): `GameOnly` before any mod
+    /// layer, `WithModLayers` with the mod layers and without the manager's panel. The returned id is in the
+    /// `ScreenshotTaken` and `ScreenshotWritten` events. It needs no manager; the loader's refusals are `Api`.
+    pub fn request_screenshot_with(&self, path: &Path, layers: ScreenshotLayers) -> Result<ShotId, LinkError> {
+        let layers = match layers {
+            ScreenshotLayers::GameOnly => ShotLayers::GameOnly,
+            ScreenshotLayers::WithModLayers => ShotLayers::WithOverlays,
         };
-        let Some(path) = path.to_str() else {
-            return Err(LinkError::from(AmmStatus::InvalidArgument));
-        };
-        let mut sequence = 0;
-        // SAFETY: the path text and the out sequence live for the call; the handle is this link's until drop
-        let status = unsafe { request_screenshot(self.handle, path.as_ptr(), path.len(), &mut sequence) };
-        match status {
-            AmmStatus::Ok => Ok(sequence),
-            other => Err(LinkError::from(other)),
-        }
+        let overlay = self.cell.ctx().overlay();
+        overlay.screenshot(path, layers).map_err(LinkError::Api)
     }
 
-    /// `request_screenshot` with a choice of capture point. `GameOnly` is taken before any mod layer;
-    /// `WithModLayers` after the last mod layer and before the manager's panel and toasts, so the picture shows the
-    /// layers of all mods, as the player sees them. The rules and the events are those of `request_screenshot`. A
-    /// manager older than ABI 1.3 is `Unsupported` for both choices.
-    pub fn request_screenshot_with(&self, path: &Path, layers: ScreenshotLayers) -> Result<u32, LinkError> {
-        let Some(request_screenshot_layers) = self.table.api().request_screenshot_layers else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        let Some(path) = path.to_str() else {
-            return Err(LinkError::from(AmmStatus::InvalidArgument));
-        };
-        let layers = AmmScreenshotLayers::from(layers) as u8;
-        let mut sequence = 0;
-        // SAFETY: the path text and the out sequence live for the call; the handle is this link's until drop
-        let status =
-            unsafe { request_screenshot_layers(self.handle, path.as_ptr(), path.len(), layers, &mut sequence) };
-        match status {
-            AmmStatus::Ok => Ok(sequence),
-            other => Err(LinkError::from(other)),
-        }
-    }
-
-    /// The manager's capture stream, for game-only frames one per Present; dropping it ends the stream. See
-    /// `CaptureStream`.
-    pub fn capture_stream(&self) -> CaptureStream {
-        CaptureStream::new(self.table, self.handle)
-    }
-
-    /// True when the manager's table has `request_screenshot`, ABI 1.2 or later. A mod can check it before it
-    /// offers a screenshot key.
-    pub fn supports_screenshots(&self) -> bool {
-        self.table.api().request_screenshot.is_some()
-    }
-
-    /// True when a mod other than this one holds `capability` now. False on a manager older than ABI 1.2. Call it
-    /// on the game thread: from a frame callback (render thread) the host is busy and the answer is false.
-    pub fn held_by_other(&self, capability: Capability) -> bool {
-        let Some(held_by_other) = self.table.api().held_by_other else {
-            return false;
-        };
-        // SAFETY: held_by_other takes plain values; the handle is this link's until drop
-        let held = unsafe { held_by_other(self.handle, AmmCapability::from(capability) as u8) };
-        held == 1
-    }
-
-    /// True while the manager panel is open. False on a manager older than ABI 2.2. Call it on the game thread: from
-    /// a frame callback (render thread) the host is busy and the answer is false.
-    pub fn panel_open(&self) -> bool {
-        let Some(panel_open) = self.table.api().panel_open else {
-            return false;
-        };
-        // SAFETY: panel_open takes a plain value; the handle is this link's until drop
-        let open = unsafe { panel_open(self.handle) };
-        open == 1
+    /// Opens a loader capture stream; dropping it closes the stream. It needs no manager; the loader's refusals are
+    /// `Api`.
+    pub fn capture_stream(&self, request: CaptureRequest) -> Result<CaptureStream, LinkError> {
+        let overlay = self.cell.ctx().overlay();
+        overlay.open_capture_stream(request).map_err(LinkError::Api)
     }
 
     /// Places a button for this mod in the corner row, left of the Mods button, on `screens`. Returns the entry
-    /// id, which `ModEvent::MenuEntryClicked` carries, or `None` on a manager older than ABI 1.4.
+    /// id, which `ModEvent::MenuEntryClicked` carries, or `None` when the manager's table has no such slot.
     pub fn register_menu_entry(
         &self,
         label: &str,
         mark: &str,
         screens: MenuScreens,
     ) -> Result<Option<MenuEntryId>, LinkError> {
-        let Some(register_menu_entry) = self.table.api().register_menu_entry else {
+        let (tables, handle) = self.connection()?;
+        let Some(register_menu_entry) = tables.core.register_menu_entry else {
             return Ok(None);
         };
         let mut id = 0u16;
-        // SAFETY: the label, the mark and the out id live for the call; the handle is this link's until drop
+        // SAFETY: the label, the mark and the out id live for the call; the handle is this link's
         let status = unsafe {
-            register_menu_entry(
-                self.handle,
-                label.as_ptr(),
-                label.len(),
-                mark.as_ptr(),
-                mark.len(),
-                screens.bits(),
-                &mut id,
-            )
+            register_menu_entry(handle, label.as_ptr(), label.len(), mark.as_ptr(), mark.len(), screens.bits(), &mut id)
         };
-        match status {
-            AmmStatus::Ok => Ok(Some(MenuEntryId(id))),
-            other => Err(LinkError::from(other)),
-        }
+        Self::check(status).map(|()| Some(MenuEntryId(id)))
     }
 
-    /// The texture budget the manager gave this mod. A manager older than ABI 1.2 is `Unsupported`.
+    /// The texture budget the manager gave this mod.
     pub fn texture_budget(&self) -> Result<TextureGrant, LinkError> {
-        let Some(texture_budget) = self.table.api().texture_budget else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
+        let (tables, handle) = self.connection()?;
+        let texture_budget = tables.layers.texture_budget.ok_or(LinkError::from(AmmStatus::Unsupported))?;
         let (mut bytes, mut count) = (0, 0);
-        // SAFETY: both out pointers live for the call; the handle is this link's until drop
-        let status = unsafe { texture_budget(self.handle, &mut bytes, &mut count) };
-        match status {
-            AmmStatus::Ok => Ok(TextureGrant { bytes, count }),
-            other => Err(LinkError::from(other)),
-        }
+        // SAFETY: both out pointers live for the call; the handle is this link's
+        let status = unsafe { texture_budget(handle, &mut bytes, &mut count) };
+        Self::check(status).map(|()| TextureGrant { bytes, count })
     }
 
     /// The live game picture this mod may draw, with the back buffer size of the last Present (0 x 0 before the
-    /// first). Draw it as `MeshFlattener::game_picture()`; the mod uploads nothing. `NotPermitted` while the mod
-    /// does not hold `Overlay`. A manager older than ABI 1.7 is `Unsupported`. Game thread only: a call from inside a
-    /// frame callback is `Busy`.
+    /// first). `NotPermitted` while the mod does not hold `Overlay`. Game thread only.
     pub fn game_picture(&self) -> Result<GamePicture, LinkError> {
-        let Some(game_picture) = self.table.api().game_picture else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
+        let (tables, handle) = self.connection()?;
+        let game_picture = tables.layers.game_picture.ok_or(LinkError::from(AmmStatus::Unsupported))?;
         let (mut width, mut height) = (0, 0);
-        // SAFETY: both out pointers live for the call; the handle is this link's until drop
-        let status = unsafe { game_picture(self.handle, &mut width, &mut height) };
-        match status {
-            AmmStatus::Ok => Ok(GamePicture::new(width, height)),
-            other => Err(LinkError::from(other)),
-        }
+        // SAFETY: both out pointers live for the call; the handle is this link's
+        let status = unsafe { game_picture(handle, &mut width, &mut height) };
+        Self::check(status).map(|()| GamePicture::new(width, height))
     }
 
-    /// Sets where this mod draws the game picture, `[min_x, min_y, max_x, max_y]` in physical pixels, or clears
-    /// it with `None`. While the mod holds `Overlay`, a pointer inside it reaches the game at the matching place of
-    /// the full window. A manager older than ABI 1.7 is `Unsupported`. Game thread only: a call from inside a frame
-    /// callback is `Busy`.
+    /// Sets where this mod draws the game picture, `[min_x, min_y, max_x, max_y]` in back-buffer pixels, or clears
+    /// it with `None`. Game thread only.
     pub fn set_game_viewport(&self, rect: Option<[f32; 4]>) -> Result<(), LinkError> {
-        let Some(set_game_viewport) = self.table.api().set_game_viewport else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        let pointer = rect.as_ref().map_or(std::ptr::null(), |rect| rect as *const [f32; 4]);
-        // SAFETY: the rect lives for the call, or the pointer is null; the handle is this link's until drop
-        let status = unsafe { set_game_viewport(self.handle, pointer) };
-        match status {
-            AmmStatus::Ok => Ok(()),
-            other => Err(LinkError::from(other)),
-        }
+        let (tables, handle) = self.connection()?;
+        let set_game_viewport = tables.layers.set_game_viewport.ok_or(LinkError::from(AmmStatus::Unsupported))?;
+        let pointer = rect.as_ref().map_or(std::ptr::null(), std::ptr::from_ref);
+        // SAFETY: the rect lives for the call, or the pointer is null; the handle is this link's
+        let status = unsafe { set_game_viewport(handle, pointer) };
+        Self::check(status)
     }
 
-    /// Makes the game draw at `size`, in physical pixels, whatever the size of its window, or ends the size this
-    /// mod forces with `None`. The mod must hold `Capability::RenderSize`; the size also ends when the lease goes.
-    /// The game resizes within a few Presents: wait until `render_size` reports `actual` equal to `wanted` before
-    /// taking a picture at the size. A side of 0 or above `RenderSize::MAX_SIDE` is `InvalidArgument`. A manager
-    /// older than ABI 1.8 is `Unsupported`. Game thread only.
+    /// Makes the game draw at `size`, in physical pixels, or ends the size this mod forces with `None`. The mod
+    /// must hold `Capability::RenderSize`. Game thread only.
     pub fn set_render_size(&self, size: Option<RenderSize>) -> Result<(), LinkError> {
-        let Some(set_render_size) = self.table.api().set_render_size else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
+        let (tables, handle) = self.connection()?;
+        let set_render_size = tables.layers.set_render_size.ok_or(LinkError::from(AmmStatus::Unsupported))?;
         let size = size.map(AmmRenderSize::from);
-        let pointer = size.as_ref().map_or(std::ptr::null(), |size| size as *const AmmRenderSize);
-        // SAFETY: the size lives for the call, or the pointer is null; the handle is this link's until drop
-        let status = unsafe { set_render_size(self.handle, pointer) };
-        match status {
-            AmmStatus::Ok => Ok(()),
-            other => Err(LinkError::from(other)),
-        }
+        let pointer = size.as_ref().map_or(std::ptr::null(), std::ptr::from_ref);
+        // SAFETY: the size lives for the call, or the pointer is null; the handle is this link's
+        let status = unsafe { set_render_size(handle, pointer) };
+        Self::check(status)
     }
 
-    /// The size this mod forces and the back buffer size and DXGI format of the last Present. `NotPermitted`
-    /// while the mod does not hold `Capability::RenderSize`. A manager older than ABI 1.8 is `Unsupported`. Game
-    /// thread only.
+    /// The size this mod forces and the back buffer size and format of the last Present. `NotPermitted` while the
+    /// mod does not hold `Capability::RenderSize`. Game thread only.
     pub fn render_size(&self) -> Result<RenderSizeState, LinkError> {
-        let Some(render_size) = self.table.api().render_size else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
+        let (tables, handle) = self.connection()?;
+        let render_size = tables.layers.render_size.ok_or(LinkError::from(AmmStatus::Unsupported))?;
         let mut state = AmmRenderSizeState::blank();
-        // SAFETY: the out state lives for the call; the handle is this link's until drop
-        let status = unsafe { render_size(self.handle, &mut state) };
-        match status {
-            AmmStatus::Ok => Ok(RenderSizeState::from(state)),
-            other => Err(LinkError::from(other)),
-        }
-    }
-
-    /// The overlay's Present count: the number of the newest Present it started, 0 before the first. A capture
-    /// stream request for a later Present is `CaptureStream::request_at`. `Unsupported` when the manager has no
-    /// such slot. Game thread only.
-    pub fn present_count(&self) -> Result<u64, LinkError> {
-        let Some(present_count) = self.table.api().present_count else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
-        let mut count = 0u64;
-        // SAFETY: the out count lives for the call; the handle is this link's until drop
-        match unsafe { present_count(self.handle, &mut count) } {
-            AmmStatus::Ok => Ok(count),
-            other => Err(LinkError::from(other)),
-        }
+        // SAFETY: the out state lives for the call; the handle is this link's
+        let status = unsafe { render_size(handle, &mut state) };
+        Self::check(status).map(|()| RenderSizeState::from(state))
     }
 
     /// Sets the mod's icon from PNG bytes: at most `IconDecoder::MAX_BYTES`, each side 1 to 256 px, first frame
-    /// only. A refused icon keeps the one shown before. A manager older than ABI 1.6 is `Unsupported`.
+    /// only. No bytes clear the icon.
     pub fn set_icon(&self, png: &[u8]) -> Result<(), LinkError> {
-        let Some(set_icon) = self.table.api().set_icon else {
-            return Err(LinkError::from(AmmStatus::Unsupported));
-        };
+        let (tables, handle) = self.connection()?;
+        let set_icon = tables.core.set_icon.ok_or(LinkError::from(AmmStatus::Unsupported))?;
         // SAFETY: the PNG bytes live for the call and the manager copies what it keeps; the handle is this link's
-        // until drop
-        let status = unsafe { set_icon(self.handle, png.as_ptr(), png.len()) };
-        match status {
-            AmmStatus::Ok => Ok(()),
-            other => Err(LinkError::from(other)),
-        }
+        let status = unsafe { set_icon(handle, png.as_ptr(), png.len()) };
+        Self::check(status)
     }
 
     /// `set_icon` over the PNG file at `path`. The mod reads the file here; the manager never opens it. A file
     /// larger than `IconDecoder::MAX_BYTES`, an empty file and a file that cannot be read are `IconFile`.
-    /// To clear the icon, call `set_icon` with no bytes.
     pub fn set_icon_file(&self, path: &Path) -> Result<(), LinkError> {
         let limit = IconDecoder::MAX_BYTES as u64;
         let file_error = |reason: String| LinkError::IconFile { reason };
@@ -618,6 +510,13 @@ impl ManagerLink {
         self.set_icon(&png)
     }
 
+    fn check(status: AmmStatus) -> Result<(), LinkError> {
+        match status {
+            AmmStatus::Ok => Ok(()),
+            other => Err(LinkError::from(other)),
+        }
+    }
+
     // The id text of a holder, or `None` for an empty or non-UTF-8 id.
     fn id_text(bytes: &[u8]) -> Option<String> {
         if bytes.is_empty() {
@@ -625,43 +524,12 @@ impl ManagerLink {
         }
         std::str::from_utf8(bytes).ok().map(str::to_owned)
     }
-
-    fn install_logging(sink: &ForwardSink) {
-        match Logger::install(Box::new(Dispatcher::new(vec![sink.clone()]))) {
-            Ok(()) | Err(InstallError::AlreadyInstalled) => {}
-        }
-        match TracingBridge::install_log_capture() {
-            Ok(()) | Err(InstallError::AlreadyInstalled) => {}
-        }
-        // The only failure is a global subscriber already set by this DLL, which counts as installed
-        if tracing_subscriber::registry().with(TracingBridge::to_global()).try_init().is_err() {
-            curia::debug!("tracing subscriber already set, kept as it is");
-        }
-    }
 }
 
 impl Drop for ManagerLink {
     fn drop(&mut self) {
-        let Some(unregister) = self.table.api().unregister else {
-            // The manager could still call the callbacks, so the frame state is left alive
-            curia::error!("manager table has no unregister, the registration and its frame state, if any, are kept");
-            self.sink.detach();
-            return;
-        };
-        // SAFETY: the handle is this link's, and drop runs once
-        let status = unsafe { unregister(self.handle) };
-        if status != AmmStatus::Ok {
-            // The registration may still be live, so the manager could still call the callbacks: the frame state
-            // is leaked rather than freed under them
-            curia::error!("unregister refused, the registration and its frame state, if any, are kept", { status: status as i32 });
-            self.sink.detach();
-            return;
-        }
-        self.sink.detach();
-        if let Some(free) = self.free {
-            // SAFETY: unregister returned Ok, so the manager no longer calls the callbacks, and user is freed here
-            // once
-            unsafe { free(self.user) };
-        }
+        // No lock is held here, so a listener in progress can finish
+        self.listeners.clear();
+        self.cell.close();
     }
 }

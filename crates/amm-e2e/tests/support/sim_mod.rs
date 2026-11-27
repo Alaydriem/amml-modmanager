@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use amm_client::link::{ForwardSink, ManagerLink};
+use amm_client::link::ManagerLink;
 use amm_core::structs::descriptor::Capability;
 use amm_core::structs::event::ModEvent;
 use amm_core::structs::lease::AcquireOutcome;
@@ -37,8 +37,7 @@ impl SimMod {
         }
         let frames = Arc::new(AtomicU32::new(0));
         let handler = SimHandler::new(behavior, Arc::clone(&frames));
-        let link = ManagerLink::new(fixture.table(), descriptor_hcl, &config_dir, handler)
-            .unwrap_or_else(|error| panic!("register: {error:?}"));
+        let link = fixture.link(descriptor_hcl, &config_dir, handler);
         Self { link, frames, config_dir }
     }
 
@@ -56,10 +55,6 @@ impl SimMod {
 
     pub fn link(&self) -> &ManagerLink {
         &self.link
-    }
-
-    pub fn sink(&self) -> ForwardSink {
-        self.link.sink()
     }
 
     /// Every event queued for the mod, oldest first.

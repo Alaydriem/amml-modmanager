@@ -3,13 +3,13 @@ use amm_core::services::IconDecoder;
 
 use crate::services::{Boundary, HostCell};
 
-/// Table `set_icon`.
+/// Core table `set_icon`.
 ///
 /// # Safety
 ///
 /// `png` is null or holds `png_len` readable bytes for the call.
 pub unsafe extern "C" fn amm_set_icon(handle: AmmHandle, png: *const u8, png_len: usize) -> AmmStatus {
-    Boundary::status(Boundary::guard(|| {
+    Boundary::status(Boundary::table(|| {
         // SAFETY: the caller gives png_len readable bytes at png for the call
         let bytes = unsafe { Boundary::bytes(png, png_len) }?;
         let icon = if bytes.is_empty() {

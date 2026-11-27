@@ -1,6 +1,6 @@
 use amm_abi::types::{AmmAcquireOutcome, AmmCapability, AmmCursorShape, AmmEventKind, AmmUiEventKind};
 use amm_core::structs::frame::FrameInputData;
-use amm_ffi::host::{amm_host_char, amm_host_focus_lost, amm_host_pointer, amm_host_take_focus_loss_owed};
+use amm_ffi::host::{amm_host_char, amm_host_focus_lost, amm_host_pointer};
 use amm_ffi::types::AmmHostPointerKind;
 
 use crate::support::test_client::SeenEvent;
@@ -69,30 +69,6 @@ fn a_pointer_move_reaches_the_frame_input_of_a_drawn_client() {
     host.frame(1);
 
     assert_eq!(client.state().events_seen.load(std::sync::atomic::Ordering::SeqCst), 1);
-}
-
-#[test]
-fn a_key_held_by_an_input_holder_before_the_panel_opens_is_released_in_its_egui() {
-    let host = TestHost::new();
-    let holder = TestClient::register(
-        &host,
-        &Descriptors::with_claims("holder", &[("Overlay", "Shared"), ("Input", "Shared")], ""),
-        TestMesh::triangle(),
-    );
-    holder.acquire(AmmCapability::Overlay);
-    assert_eq!(holder.acquire(AmmCapability::Input).outcome, AmmAcquireOutcome::Granted);
-    host.key(KEY_Q, true, 0, 0);
-    host.frame(1);
-    let seen_down = holder.state().events_seen.load(std::sync::atomic::Ordering::SeqCst);
-    host.key(0x79, true, TestHost::CTRL | TestHost::SHIFT, 2);
-    host.key(0x79, false, TestHost::CTRL | TestHost::SHIFT, 3);
-
-    let released = host.key(KEY_Q, false, 0, 4);
-    host.frame(5);
-
-    assert_eq!(seen_down, 1);
-    assert!(released.consume);
-    assert_eq!(holder.state().events_seen.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
 fn centre([min_x, min_y, max_x, max_y]: [f32; 4]) -> (f32, f32) {
@@ -252,7 +228,7 @@ fn a_mod_with_no_field_and_no_input_lease_gets_no_navigation_keys() {
 }
 
 #[test]
-fn focus_loss_is_swallowed_only_under_a_full_block_holder() {
+fn focus_loss_always_reaches_the_game_even_with_a_full_block_claim() {
     let host = TestHost::new();
     let headless = TestClient::register(
         &host,
@@ -269,34 +245,6 @@ fn focus_loss_is_swallowed_only_under_a_full_block_holder() {
         TestMesh::triangle(),
     );
 
+    assert_eq!(headless.acquire_raw(1).outcome, AmmAcquireOutcome::Denied);
     assert!(!amm_host_focus_lost());
-    assert_eq!(headless.acquire(AmmCapability::Input).outcome, AmmAcquireOutcome::Granted);
-    assert!(amm_host_focus_lost());
-}
-
-#[test]
-fn a_full_block_that_kept_a_focus_loss_owes_it_to_the_game_once_it_ends() {
-    let host = TestHost::new();
-    let headless = TestClient::register(
-        &host,
-        &Descriptors::with_claims(
-            "headless",
-            &[],
-            "claim \"Input\" {
-  mode = \"Exclusive\"
-  reason = \"r\"
-  full_block = true
-}
-",
-        ),
-        TestMesh::triangle(),
-    );
-    assert_eq!(headless.acquire(AmmCapability::Input).outcome, AmmAcquireOutcome::Granted);
-    assert!(amm_host_focus_lost());
-    assert!(!amm_host_take_focus_loss_owed());
-
-    headless.release_raw(AmmCapability::Input as u8);
-
-    assert!(amm_host_take_focus_loss_owed());
-    assert!(!amm_host_take_focus_loss_owed());
 }

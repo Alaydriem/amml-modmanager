@@ -1,122 +1,139 @@
-#![allow(unsafe_code)]
-
 use std::cell::UnsafeCell;
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
-use amm_abi::types::AmmStatus;
-use amm_ffi::host::{
-    amm_host_capture_buffer, amm_host_capture_done, amm_host_frame, amm_host_render_size, amm_host_stream_buffer,
-    amm_host_stream_done, amm_host_textures_lost,
-};
+use amm_abi::types::AmmCursorShape;
+use amm_core::structs::render::RenderSize;
+use amm_ffi::services::HostCell;
 use amm_ffi::types::{AmmHostFrame, AmmHostFrameInput};
 use amm_overlay::OverlayHost;
-use amml_sdk::ModRuntime;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
+use amml_api::Ctx;
 
-use super::ManagerState;
-
-/// The manager host as the overlay sees it: the host frame, the textures-lost signal and the captures, through
-/// the `amm_host_*` calls, and the cursor and HUD state each frame asks for, published for the game thread.
+/// The manager host as the overlay renderer sees it: each present's host frame (with the screen code of the last
+/// tick), the textures-lost signal, and what a frame hands on to the other threads: the cursor shape the layers or
+/// the panel ask for, and the size message for the game window. It lives for the process (the renderer needs a
+/// `'static` host), inside `ManagerRuntime`; with no host running it gives no frame.
 pub struct ManagerOverlayHost {
-    state: &'static ManagerState,
-    // the last host frame; written only by `frame`, which the overlay calls on the render thread, one at a time
+    cell: &'static HostCell,
+    ctx: Ctx,
+    // the screen code of the last tick (`TickService::MENU_*`), written on the game thread
+    menu: Arc<AtomicU8>,
+    // the last host frame; written only by `frame`, which one renderer calls on the render thread, one at a time
     frame: UnsafeCell<AmmHostFrame>,
     // a failed host frame was logged; cleared by the next frame that works
     failure_logged: AtomicBool,
+    // the `AmmCursorShape` of the last frame
+    cursor: AtomicU8,
+    // the size message of the last frame that had one, as `width << 32 | height`; 0 when none waits
+    size_message: AtomicU64,
+    frames: AtomicU64,
+    skipped: AtomicU64,
 }
 
-// SAFETY: `frame` is touched only by `OverlayHost::frame`, which the overlay calls inside a Present under its
-// render lock, so never on two threads at once; the rest is atomics and a shared reference to atomics
+// SAFETY: `frame` is written and read only by `OverlayHost::frame` and the renderer that called it, which runs
+// inside one `FramePresent` listener behind the renderer's lock, so never on two threads at once; `ctx` holds the
+// loader's tables, which every thread may call; the rest is atomics
+#[allow(unsafe_code)]
 unsafe impl Sync for ManagerOverlayHost {}
 
+// SAFETY: the frame's pointers point into the host's buffers, not into thread-local memory, and are read only as
+// `Sync` above describes; the rest is `Send`
+#[allow(unsafe_code)]
+unsafe impl Send for ManagerOverlayHost {}
+
 impl ManagerOverlayHost {
-    pub fn new(state: &'static ManagerState) -> Self {
-        Self { state, frame: UnsafeCell::new(AmmHostFrame::empty()), failure_logged: AtomicBool::new(false) }
+    pub fn new(cell: &'static HostCell, ctx: Ctx, menu: Arc<AtomicU8>) -> Self {
+        Self {
+            cell,
+            ctx,
+            menu,
+            frame: UnsafeCell::new(AmmHostFrame::empty()),
+            failure_logged: AtomicBool::new(false),
+            cursor: AtomicU8::new(AmmCursorShape::Default as u8),
+            size_message: AtomicU64::new(0),
+            frames: AtomicU64::new(0),
+            skipped: AtomicU64::new(0),
+        }
     }
 
-    /// A host that lives for the process, as the overlay requires.
-    pub fn leaked(state: &'static ManagerState) -> &'static Self {
-        Box::leak(Box::new(Self::new(state)))
+    /// The cursor shape the last frame asked for: `Default` before the first frame and when nothing asks for one.
+    pub fn cursor_shape(&self) -> AmmCursorShape {
+        match self.cursor.load(Ordering::Relaxed) {
+            1 => AmmCursorShape::Arrow,
+            2 => AmmCursorShape::Hand,
+            3 => AmmCursorShape::Text,
+            _ => AmmCursorShape::Default,
+        }
+    }
+
+    /// The size message the last frames gave for the game window, once; `None` when none waits.
+    pub fn take_size_message(&self) -> Option<RenderSize> {
+        let packed = self.size_message.swap(0, Ordering::AcqRel);
+        (packed != 0).then(|| RenderSize::new((packed >> 32) as u32, packed as u32))
+    }
+
+    /// How many host frames the renderer asked for.
+    pub fn frames(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
+    /// How many presents drew no frame.
+    pub fn skipped(&self) -> u64 {
+        self.skipped.load(Ordering::Relaxed)
+    }
+
+    // hands on what the other threads read from a frame
+    fn publish(&self, frame: &AmmHostFrame) {
+        self.cursor.store(frame.cursor as u8, Ordering::Relaxed);
+        if frame.size_message_width != 0 && frame.size_message_height != 0 {
+            let packed = (u64::from(frame.size_message_width) << 32) | u64::from(frame.size_message_height);
+            self.size_message.store(packed, Ordering::Release);
+        }
     }
 }
 
-// SAFETY: `frame` returns the frame `amm_host_frame` wrote, whose layer and mesh pointers the host keeps valid
-// until its next `amm_host_frame`, which only the next `frame` call makes. `capture_buffer` returns the buffer of
-// `amm_host_capture_buffer`, writable for `height` rows of the returned pitch until `amm_host_capture_done`,
-// `amm_host_textures_lost` or the next `amm_host_frame`; `stream_buffer` likewise for `amm_host_stream_buffer` and
-// `amm_host_stream_done`
+// SAFETY: `frame` returns the frame `HostCell::frame` composed, whose layer and mesh pointers the host keeps valid
+// until its next frame, which only the next `frame` call asks for
+#[allow(unsafe_code)]
 unsafe impl OverlayHost for ManagerOverlayHost {
     fn game_ready(&self) -> bool {
-        self.state.tick().game_ready()
+        self.ctx.game_alive()
     }
 
     fn frame(&self, input: &AmmHostFrameInput) -> Option<&AmmHostFrame> {
-        if ModRuntime::is_disabled() {
-            return None;
-        }
-        let input = AmmHostFrameInput { menu_screen: self.state.menu().current(), ..*input };
-        let out = self.frame.get();
-        // SAFETY: `input` lives for the call, and `out` points to this host's frame cell, which no other call uses
-        // while this one runs
-        let status = unsafe { amm_host_frame(&input, out) };
-        if status != AmmStatus::Ok {
-            if !self.failure_logged.swap(true, Ordering::Relaxed) {
-                curia::warn!("host frame failed, no layers drawn until it works again", { status: status as i32 });
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        let input = AmmHostFrameInput { menu_screen: self.menu.load(Ordering::Relaxed), ..*input };
+        let composed = match self.cell.frame(&input) {
+            Ok(composed) => composed,
+            Err(status) => {
+                if !self.failure_logged.swap(true, Ordering::Relaxed) {
+                    let status = format!("{status:?}");
+                    self.ctx
+                        .log()
+                        .warn("host frame failed, no layers drawn until it works again", &[("status", &status)]);
+                }
+                return None;
             }
-            return None;
-        }
+        };
         self.failure_logged.store(false, Ordering::Relaxed);
-        // SAFETY: `amm_host_frame` wrote the cell; the reference is used until the next `frame` call
-        let frame = unsafe { &*out };
-        self.state.frame().publish(self.state.latch(), frame.cursor_free, frame.cursor, frame.hide_vanilla_hud);
-        Some(frame)
+        self.publish(&composed);
+        let cell = self.frame.get();
+        // SAFETY: only this call writes the cell, and the renderer that called it is done with the frame the cell held
+        // (it asks for a new frame only after it drew the last one); the reference lives until the next `frame` call
+        unsafe {
+            cell.write(composed);
+            Some(&*cell)
+        }
     }
 
     fn textures_lost(&self) {
-        amm_host_textures_lost();
-    }
-
-    fn capture_buffer(&self, sequence: u32, width: u32, height: u32) -> Option<(NonNull<u8>, u32)> {
-        let mut row_pitch = 0u32;
-        // SAFETY: `row_pitch` is a writable local
-        let buffer = unsafe { amm_host_capture_buffer(sequence, width, height, &mut row_pitch) };
-        NonNull::new(buffer).map(|buffer| (buffer, row_pitch))
-    }
-
-    fn capture_done(&self, sequence: u32, ok: bool, format: DXGI_FORMAT) {
-        amm_host_capture_done(sequence, u8::from(ok), format.0 as u32);
-    }
-
-    fn stream_buffer(&self, id: u32, width: u32, height: u32) -> Option<(NonNull<u8>, u32)> {
-        let mut row_pitch = 0u32;
-        // SAFETY: `row_pitch` is a writable local
-        let buffer = unsafe { amm_host_stream_buffer(id, width, height, &mut row_pitch) };
-        NonNull::new(buffer).map(|buffer| (buffer, row_pitch))
-    }
-
-    fn stream_done(&self, id: u32, ok: bool, format: DXGI_FORMAT) {
-        let status = amm_host_stream_done(id, u8::from(ok), format.0 as u32);
-        if status != AmmStatus::Ok {
-            curia::warn!("stream frame report refused", { id: id, status: status as i32 });
-        }
-    }
-
-    fn render_size(&self, width: u32, height: u32) -> Option<(u32, u32)> {
-        if ModRuntime::is_disabled() {
-            return None;
-        }
-        let (mut forced_width, mut forced_height) = (0u32, 0u32);
-        // SAFETY: both out pointers are writable locals
-        unsafe { amm_host_render_size(width, height, &mut forced_width, &mut forced_height) }
-            .then_some((forced_width, forced_height))
-    }
-
-    fn size_forced(&self) -> bool {
-        self.render_size(0, 0).is_some()
+        let _ = self.cell.with(|runtime| {
+            runtime.textures_lost();
+            Ok(())
+        });
     }
 
     fn frame_skipped(&self) {
-        self.state.frame().publish_safe(self.state.latch());
+        self.skipped.fetch_add(1, Ordering::Relaxed);
     }
 }

@@ -1,109 +1,118 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 
 use amm_abi::types::AmmStatus;
-use amm_overlay::{ShutdownOutcome, UninstallOutcome};
-use amml_sdk::SdkError;
-use amml_sdk::amml_abi::AmmlLogLevel;
+use amm_ffi::api::ManagerTables;
+use amm_ffi::services::HostCell;
+use amml_api::amml_abi::AmmlStatus;
+use amml_api::{ApiError, Ctx, DisableCtx};
 
-use super::ManagerState;
+use super::{
+    ConsoleMirror, ManagerClock, ManagerInputSink, ManagerListeners, ManagerOverlayHost, ManagerRuntime, ManagerState,
+    TickService,
+};
 use crate::paths::ManagerPaths;
-use crate::traits::GameCalls;
-use crate::types::{DisableOutcome, HookGroup};
 
-/// The order the manager starts and stops in. Enable starts the host before any hook, so no hook calls into a
-/// host that does not run. Disable gives the game its window input and mouse back while the host still runs,
-/// drains the overlay, stops the tick, raises the stop latch, puts the cursor and the HUD back, and destroys the
-/// host only when no thread can still be inside a call into it.
+/// The order the manager starts and stops in. Load reads the folders and keeps the runtime; it starts no thread, so
+/// it stays free of side effects before the game's static initialisers. Enable starts the host (and with it the
+/// config writer thread) when none runs, so the tables have a host to serve from their first call, provides the
+/// five tables, pushes the lease ranking and adds the listeners. Disable closes the tables first (a late call from a
+/// consumer gets `Disabled`), ends the panel lease, drops the listeners, leaves the client flags to the loader
+/// (it writes back the HUD and the mouse grab of a disabled mod), and stops the host last.
+#[derive(Clone, Copy)]
 pub struct ManagerLifecycle {
-    state: &'static ManagerState,
-    // a disable could not drain a call into the host; such a thread may never leave, so the host is never
-    // destroyed in this process
-    host_kept: AtomicBool,
+    runtime: &'static ManagerRuntime,
+    cell: &'static HostCell,
 }
 
 impl ManagerLifecycle {
-    /// How long disable waits for a thread inside a swap chain hook.
-    pub const OVERLAY_TIMEOUT: Duration = Duration::from_millis(2000);
-    /// The mouse grab and the HUD are put back only when the game ticked this recently.
-    pub const RESTORE_TICK_WINDOW_MS: u64 = 1000;
-    const KEPT_NOT_DRAINED: &'static str =
-        "manager host left alive, the overlay or the window input did not stop in time";
-    const KEPT_FROM_EARLIER: &'static str =
-        "manager host left alive, an earlier disable could not drain a call into it";
-
-    pub fn new(state: &'static ManagerState) -> Self {
-        Self { state, host_kept: AtomicBool::new(false) }
+    pub fn new(runtime: &'static ManagerRuntime, cell: &'static HostCell) -> Self {
+        Self { runtime, cell }
     }
 
-    pub fn enable(&self, calls: &dyn GameCalls, paths: &ManagerPaths) -> Result<(), SdkError> {
-        let status = calls.create_host(paths);
-        if status != AmmStatus::Ok {
-            return Err(SdkError::Mod(format!("@amml/modmanager could not start its Rust host ({status:?})")));
-        }
-        calls.set_console(true);
-        self.state.latch().lower();
-        if let Err(error) = calls.install_hooks() {
-            self.state.latch().raise();
-            self.stop_host(calls, Self::KEPT_FROM_EARLIER);
-            return Err(error);
-        }
-        if let Some(device) = calls.mouse_device() {
-            self.state.fake_pointer().set_device(device);
-        }
-        let move_available = self.state.fake_move().set_layout(calls.move_layout());
-        calls.set_move_available(move_available);
-        calls.install_overlay();
+    /// The lifecycle over the runtime `load` installed; `NotReady` when load did not run.
+    pub fn installed() -> Result<Self, ApiError> {
+        ManagerRuntime::get().map(|runtime| Self::new(runtime, HostCell::global())).ok_or(ApiError::NotReady)
+    }
+
+    /// Reads the manager folders and keeps the runtime with its overlay host. A missing config or data folder is
+    /// `NotAvailable`, with a log line. No thread starts here.
+    pub fn load(ctx: &Ctx) -> Result<(), ApiError> {
+        let paths = ManagerPaths::from_dirs(&ctx.dirs()).map_err(|error| {
+            ctx.log().error("manager folders missing", &[("error", &error.to_string())]);
+            ApiError::NotAvailable
+        })?;
+        let menu = Arc::new(AtomicU8::new(TickService::MENU_NONE));
+        let overlay = ManagerOverlayHost::new(HostCell::global(), *ctx, Arc::clone(&menu));
+        ManagerRuntime::install(ManagerRuntime::new(paths, ManagerClock::new(), menu, overlay));
         Ok(())
     }
 
-    pub fn disable(&self, calls: &dyn GameCalls) -> DisableOutcome {
-        calls.remove_hooks(HookGroup::Input);
-        let input = calls.uninstall_wndproc();
-        // the host forces no render size from here on; the restore is posted after the overlay drained, so no
-        // frame can post a size message after it
-        let restore = calls.close_render_size();
-        calls.remove_hooks(HookGroup::Grab);
-        calls.remove_hooks(HookGroup::Turn);
-        // the overlay forgets the window at shutdown
-        let foreground = calls.game_window_foreground();
-        let overlay = calls.shutdown_overlay(Self::OVERLAY_TIMEOUT);
-        if let Some(restore) = restore {
-            calls.post_render_restore(restore);
+    /// A failure after the host started stops it again, with the console mirror and the tables, as `disable` does:
+    /// the loader runs no `disable` for a mod whose `enable` failed.
+    pub fn enable(&self, ctx: &Ctx) -> Result<(), ApiError> {
+        if self.cell.shared().is_none() {
+            self.start_host(ctx)?;
         }
-        calls.remove_hooks(HookGroup::World);
-        // a game that stopped ticking is closing, and its ClientInstance and MinecraftGame may be gone
-        let ticking = self.state.tick().ticked_within(calls.now_ms(), Self::RESTORE_TICK_WINDOW_MS);
-        if ticking {
-            // held fake keys and buttons go up while the game still ticks, since the keyboard and mouse calls need
-            // its thread
-            calls.release_fake_keys();
-            self.state.fake_keys().flush(calls);
-            // no look turn goes to the game here: the turn hook is already removed
-            self.state.fake_pointer().flush(calls, 0);
+        let enabled = self.enable_on_host(ctx);
+        if enabled.is_err() {
+            self.stop_host();
         }
-        calls.remove_hooks(HookGroup::Tick);
-        self.state.fake_move().stop();
-        self.state.latch().raise();
-        if ticking {
-            let client = self.state.tick().client();
-            self.state.grab().restore(calls, client, foreground);
-            self.state.hud().restore(calls, client);
-        }
-        if overlay == ShutdownOutcome::Leaked || input == UninstallOutcome::TimedOut {
-            self.host_kept.store(true, Ordering::SeqCst);
-        }
-        self.stop_host(calls, Self::KEPT_NOT_DRAINED)
+        enabled
     }
 
-    // `kept` is the log line when the host stays alive
-    fn stop_host(&self, calls: &dyn GameCalls, kept: &str) -> DisableOutcome {
-        if self.host_kept.load(Ordering::SeqCst) {
-            calls.log(AmmlLogLevel::WARN, kept);
-            return DisableOutcome::KeptAlive;
+    fn enable_on_host(&self, ctx: &Ctx) -> Result<(), ApiError> {
+        ConsoleMirror::start(ctx.log());
+        self.cell.set_console(Some(ConsoleMirror::write));
+        ManagerTables::provide_all(&ctx.registry())?;
+        let runtime = self.runtime;
+        let sink = ManagerInputSink::new(self.cell);
+        let state = Arc::new(ManagerState::new(ctx, sink, runtime.clock(), runtime.menu(), runtime.overlay()));
+        state.sync_ranking();
+        let listeners = ManagerListeners::install(ctx, &state, runtime.overlay(), runtime.clock())?;
+        runtime.activate(state, listeners);
+        ctx.log().info("manager enabled", &[]);
+        Ok(())
+    }
+
+    pub fn disable(&self, ctx: &Ctx, how: &DisableCtx) {
+        let _ = self.cell.with(|runtime| {
+            runtime.disable_tables();
+            Ok(())
+        });
+        let (state, listeners) = self.runtime.deactivate();
+        if how.game_alive
+            && let Some(state) = state.as_ref()
+        {
+            // a loss held back under the open panel would never reach the game: the manager listens no more
+            state.replay_held_focus();
         }
-        calls.set_console(false);
-        calls.destroy_host();
-        DisableOutcome::Destroyed
+        drop(state.as_ref().and_then(|state| state.take_panel_lease()));
+        drop(listeners);
+        drop(state);
+        if how.game_alive && how.client().is_some() {
+            ctx.log().debug("client flags left to the loader", &[]);
+        }
+        self.stop_host();
+    }
+
+    // Closes the tables, stops the console mirror, and stops the host with its writer thread.
+    fn stop_host(&self) {
+        let _ = self.cell.with(|runtime| {
+            runtime.disable_tables();
+            Ok(())
+        });
+        self.cell.set_console(None);
+        ConsoleMirror::stop();
+        self.cell.destroy();
+    }
+
+    fn start_host(&self, ctx: &Ctx) -> Result<(), ApiError> {
+        let paths = self.runtime.paths();
+        let created = self.cell.create(paths.config_dir.clone(), paths.data_dir.clone(), paths.version.clone());
+        created.map_err(|status: AmmStatus| {
+            ctx.log().error("manager host did not start", &[("status", &format!("{status:?}"))]);
+            ApiError::Loader(AmmlStatus::FAILED)
+        })
     }
 }

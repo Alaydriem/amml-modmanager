@@ -18,17 +18,9 @@ impl PathRules {
         (text.is_empty() || !path.is_absolute() || has_parent).then_some("it must be absolute with no ..")
     }
 
-    /// Why a screenshot file path is refused on its own text, or `None`. On top of `fault`, it must be UTF-8 and
-    /// end in `.png` in any case. It does not look at the file system: the host checks that the parent folder
-    /// exists.
-    pub fn screenshot_fault(path: &Path) -> Option<&'static str> {
-        if let Some(reason) = Self::fault(path) {
-            return Some(reason);
-        }
-        if path.to_str().is_none() {
-            return Some("it is not UTF-8");
-        }
-        let is_png = path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
-        (!is_png).then_some("it does not end in .png")
+    /// The AMML mods folder that holds the manager, from the manager's own config folder
+    /// `<mods>/@<namespace>/<name>/config`: the folder three levels up. `None` for a path with fewer levels.
+    pub fn mods_root(manager_config_dir: &Path) -> Option<&Path> {
+        manager_config_dir.ancestors().nth(3).filter(|root| !root.as_os_str().is_empty())
     }
 }

@@ -22,4 +22,16 @@ impl DrawReport {
     pub fn skipped(&self) -> u32 {
         self.skipped_range + self.skipped_pipeline + self.skipped_texture + self.skipped_scissor
     }
+
+    /// The report of two ranges of one frame together.
+    pub fn and(self, other: DrawReport) -> DrawReport {
+        DrawReport {
+            drawn: self.drawn + other.drawn,
+            skipped_range: self.skipped_range + other.skipped_range,
+            skipped_pipeline: self.skipped_pipeline + other.skipped_pipeline,
+            skipped_texture: self.skipped_texture + other.skipped_texture,
+            skipped_scissor: self.skipped_scissor + other.skipped_scissor,
+            geometry_dropped: self.geometry_dropped || other.geometry_dropped,
+        }
+    }
 }

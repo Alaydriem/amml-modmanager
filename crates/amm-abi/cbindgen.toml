@@ -16,10 +16,6 @@ prefix_with_name = true
 include = [
   "AmmStatus",
   "AmmCapability",
-  "AmmScreenshotLayers",
-  "AmmCaptureStreamRequest",
-  "AmmCaptureStreamFault",
-  "AmmCaptureStreamFrame",
   "AmmAcquireOutcome",
   "AmmAcquireResult",
   "AmmEventKind",
@@ -36,6 +32,9 @@ include = [
   "AmmFrameOutput",
   "AmmCallbacks",
   "AmmHandle",
-  "AmmLogLevel",
-  "AmmApi",
+  "AmmCoreTable",
+  "AmmSettingsTable",
+  "AmmKeybindsTable",
+  "AmmLayersTable",
+  "AmmLeasesTable",
 ]

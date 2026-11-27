@@ -3,7 +3,7 @@ use amm_abi::types::{AmmEventKind, AmmStatus};
 use crate::support::{Descriptors, TestClient, TestHost, TestMesh};
 
 fn register_entry(client: &TestClient, label: &str, mark: &str, screens: u8) -> Result<u16, AmmStatus> {
-    let register = TestHost::api().register_menu_entry.unwrap_or_else(|| panic!("register_menu_entry"));
+    let register = TestHost::core_table().register_menu_entry.unwrap_or_else(|| panic!("register_menu_entry"));
     let mut id = 0u16;
     // SAFETY: the label, the mark and the out id live for the call
     let status =
@@ -27,7 +27,7 @@ fn register_menu_entry_gives_ids_from_one() {
 fn register_menu_entry_refuses_bad_text_and_a_null_out_pointer() {
     let host = TestHost::new();
     let client = TestClient::register(&host, &Descriptors::overlay("menu-bad"), TestMesh::triangle());
-    let register = TestHost::api().register_menu_entry.unwrap_or_else(|| panic!("register_menu_entry"));
+    let register = TestHost::core_table().register_menu_entry.unwrap_or_else(|| panic!("register_menu_entry"));
 
     let long_mark = register_entry(&client, "Dejavu", "DEJA", 1);
     let no_screen = register_entry(&client, "Dejavu", "DV", 0);

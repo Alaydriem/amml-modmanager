@@ -1,5 +1,4 @@
 pub mod abi;
-pub mod capture;
 pub mod clash;
 pub mod descriptor;
 #[cfg(feature = "egui")]
@@ -21,7 +20,6 @@ pub mod toast;
 pub mod write;
 
 pub use abi::AbiPrefix;
-pub use capture::CaptureBook;
 pub use clash::ClashAnalyzer;
 pub use descriptor::DescriptorChecker;
 #[cfg(feature = "egui")]

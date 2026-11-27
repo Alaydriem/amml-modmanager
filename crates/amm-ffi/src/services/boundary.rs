@@ -3,6 +3,8 @@ use amm_core::services::PanicGuard;
 use amm_core::services::abi::AbiPrefix;
 use amm_core::traits::AbiSized;
 
+use super::HostCell;
+
 /// The rules every entry point follows: no panic crosses into C or C++, and every pointer and length is checked
 /// before it is read.
 pub struct Boundary;
@@ -12,6 +14,15 @@ impl Boundary {
     pub fn guard<T>(f: impl FnOnce() -> Result<T, AmmStatus>) -> Result<T, AmmStatus> {
         PanicGuard::run(f, |payload| curia::error!("panic stopped at the manager boundary", { payload: payload }))
             .unwrap_or(Err(AmmStatus::Panic))
+    }
+
+    /// Runs the body of a registry table function: `Disabled` without running it once the manager closed its
+    /// tables, otherwise as `guard`.
+    pub fn table<T>(f: impl FnOnce() -> Result<T, AmmStatus>) -> Result<T, AmmStatus> {
+        if HostCell::global().tables_closed() {
+            return Err(AmmStatus::Disabled);
+        }
+        Self::guard(f)
     }
 
     /// The status an entry point returns for a body result.

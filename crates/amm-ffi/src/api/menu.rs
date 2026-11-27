@@ -3,7 +3,7 @@ use amm_core::structs::menu::MenuScreens;
 
 use crate::services::{Boundary, HostCell};
 
-/// Table `register_menu_entry`.
+/// Core table `register_menu_entry`.
 ///
 /// # Safety
 ///
@@ -18,7 +18,7 @@ pub unsafe extern "C" fn amm_register_menu_entry(
     screens: u8,
     out_id: *mut u16,
 ) -> AmmStatus {
-    Boundary::status(Boundary::guard(|| {
+    Boundary::status(Boundary::table(|| {
         let out_id = Boundary::writable(out_id)?;
         // SAFETY: the caller gives label_len readable bytes at label for the call
         let label = unsafe { Boundary::text(label, label_len) }?;

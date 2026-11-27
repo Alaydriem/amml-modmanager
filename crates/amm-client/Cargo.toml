@@ -11,7 +11,7 @@ autotests = false
 [features]
 default = ["egui"]
 egui = ["dep:egui", "dep:amml-ui", "dep:amml-i18n", "dep:crossbeam-channel", "amm-core/egui"]
-test-support = []
+test-support = ["amml-api/test"]
 
 [[test]]
 name = "integration"
@@ -23,6 +23,8 @@ workspace = true
 [dependencies]
 amm-abi.workspace = true
 amm-core.workspace = true
+# The loader: the registry the manager tables come from, input leases, screenshots, the mod's logger and folders
+amml-api.workspace = true
 amml-ui = { workspace = true, optional = true }
 amml-i18n = { workspace = true, optional = true }
 egui = { workspace = true, optional = true }
@@ -30,12 +32,13 @@ crossbeam-channel = { workspace = true, optional = true }
 curia.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 hcl-rs.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory"] }
 
 [dev-dependencies]
 amm-client = { path = ".", features = ["test-support"] }
+# `FakeGame`: the loader, its registry and input leases for the link tests
+amml-api = { workspace = true, features = ["test"] }
 chrono.workspace = true
 tracing.workspace = true
 tempfile.workspace = true

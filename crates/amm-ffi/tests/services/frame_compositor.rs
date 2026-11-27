@@ -42,22 +42,23 @@ impl Rig {
     /// A rig whose descriptor has `extra` HCL after its claims.
     fn with_descriptor(budgets: &str, mesh: TestMesh, layers: &[Capability], extra: &str) -> Rig {
         let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error:?}"));
-        let manager_dir = dir.path().join("manager");
+        let manager_dir = dir.path().join("mods").join("@amml").join("modmanager").join("config");
         std::fs::create_dir_all(&manager_dir).unwrap_or_else(|error| panic!("manager folder: {error:?}"));
         std::fs::write(manager_dir.join("config.hcl"), format!("budgets {{\n{budgets}\n}}\n"))
             .unwrap_or_else(|error| panic!("config: {error:?}"));
         let mut runtime = HostRuntime::new(manager_dir, dir.path().join("game"), "test".into())
             .unwrap_or_else(|error| panic!("runtime: {error:?}"));
         let (state, callbacks) = TestClient::detached(mesh);
-        let mod_dir = dir.path().join("mods").join("rig").join("config");
+        let mod_dir = dir.path().join("mods").join("@test").join("rig").join("config");
         let claims: Vec<(&str, &str)> = layers
             .iter()
             .map(|capability| (if *capability == Capability::Hud { "Hud" } else { "Overlay" }, "Shared"))
             .collect();
         let descriptor = Descriptors::with_claims("rig", &claims, extra);
         let handle = runtime
-            .register(descriptor.as_bytes(), Path::new(&mod_dir), callbacks)
+            .register(descriptor.as_bytes(), Path::new(&mod_dir))
             .unwrap_or_else(|error| panic!("registered: {error:?}"));
+        runtime.set_callbacks(handle, callbacks).unwrap_or_else(|error| panic!("callbacks: {error:?}"));
         for capability in layers {
             runtime.acquire(handle, *capability).unwrap_or_else(|error| panic!("layer: {error:?}"));
         }

@@ -9,10 +9,9 @@ use arc_swap::ArcSwap;
 
 use super::HolderBook;
 
-/// The host state other threads read without the host lock: the render snapshot, the live generation of each
-/// slot (for `log`), the holder book (for `holder`), the end of the last visible toast, whether the menu button
-/// is placed, whether the player's turn is blocked, whether the gamepad is blocked, whether a screenshot capture is in flight, the owners
-/// whose textures must be dropped, the forced render size (for `ResizeBuffers` and the window procedure), whether
+/// The host state other threads read without the host lock: the render snapshot (also for `panel_open`), the live
+/// generation of each slot, the holder book (for `holder`), the end of the last visible toast, whether the menu button
+/// is placed, the owners whose textures must be dropped, the forced render size (for `ResizeBuffers` and the window procedure), whether
 /// the render size needs every frame, whether the game window changed since the last frame, and the back buffer of
 /// the last Present. Every field is fixed in size.
 pub struct HostShared {
@@ -21,9 +20,6 @@ pub struct HostShared {
     holders: ArcSwap<HolderBook>,
     toast_until_ms: AtomicU64,
     menu_button_placed: AtomicBool,
-    blocks_player_turn: AtomicBool,
-    blocks_gamepad: AtomicBool,
-    capturing: AtomicBool,
     freed_owners: AtomicU32,
     // the forced render size packed by `pack`, 0 for none
     forced_size: AtomicU64,
@@ -34,11 +30,16 @@ pub struct HostShared {
     // other, so a reader may see the size of one Present with the format of the one before
     back_buffer: AtomicU64,
     back_buffer_format: AtomicU32,
+    // the last pointer move passed without the host lock, its x and y bits packed by `pack_point`, `NO_POINT` for
+    // none; the next call under the lock routes it
+    pending_pointer: AtomicU64,
 }
 
 impl HostShared {
     const LIVE: u32 = 1 << 16;
     const WIDTH_SHIFT: u32 = 32;
+    // two all-ones f32 bit patterns, a NaN pair no pointer position has
+    const NO_POINT: u64 = u64::MAX;
 
     pub fn new(snapshot: Arc<ArcSwap<RenderSnapshot>>, holders: Arc<HolderBook>) -> Self {
         Self {
@@ -47,15 +48,13 @@ impl HostShared {
             holders: ArcSwap::new(holders),
             toast_until_ms: AtomicU64::new(0),
             menu_button_placed: AtomicBool::new(false),
-            blocks_player_turn: AtomicBool::new(false),
-            blocks_gamepad: AtomicBool::new(false),
-            capturing: AtomicBool::new(false),
             freed_owners: AtomicU32::new(0),
             forced_size: AtomicU64::new(0),
             render_size_busy: AtomicBool::new(false),
             window_changed: AtomicBool::new(false),
             back_buffer: AtomicU64::new(0),
             back_buffer_format: AtomicU32::new(0),
+            pending_pointer: AtomicU64::new(Self::NO_POINT),
         }
     }
 
@@ -100,32 +99,9 @@ impl HostShared {
         self.menu_button_placed.load(Ordering::Relaxed)
     }
 
-    pub fn set_blocks_player_turn(&self, blocks: bool) {
-        self.blocks_player_turn.store(blocks, Ordering::Relaxed);
-    }
-
-    /// True while an active Input holder asks for the player's own turn to be blocked.
-    pub fn blocks_player_turn(&self) -> bool {
-        self.blocks_player_turn.load(Ordering::Relaxed)
-    }
-
-    pub fn set_blocks_gamepad(&self, blocks: bool) {
-        self.blocks_gamepad.store(blocks, Ordering::Relaxed);
-    }
-
-    /// True while the active exclusive Input holder has a `full_block` claim.
-    pub fn blocks_gamepad(&self) -> bool {
-        self.blocks_gamepad.load(Ordering::Relaxed)
-    }
-
-    pub fn set_capturing(&self, capturing: bool) {
-        self.capturing.store(capturing, Ordering::Relaxed);
-    }
-
-    /// True while a capture waits to be offered to the overlay or for its report, so every Present must reach the
-    /// host.
-    pub fn capturing(&self) -> bool {
-        self.capturing.load(Ordering::Relaxed)
+    /// True while the manager panel is open.
+    pub fn panel_open(&self) -> bool {
+        self.snapshot.load().panel_open
     }
 
     pub fn mark_freed(&self, slot: u16) {
@@ -175,6 +151,32 @@ impl HostShared {
     /// The back buffer size and DXGI format of the last Present, 0 x 0 and 0 before the first.
     pub fn back_buffer(&self) -> (RenderSize, u32) {
         (Self::unpack(self.back_buffer.load(Ordering::Relaxed)), self.back_buffer_format.load(Ordering::Relaxed))
+    }
+
+    /// True when a pointer move would change nothing but the tracked pointer position: no layer, the panel
+    /// closed, no menu button placed and no forced render size. Such a move can pass without the host lock.
+    pub fn pointer_quiet(&self) -> bool {
+        let snapshot = self.snapshot.load();
+        snapshot.layers.is_empty() && !snapshot.panel_open && !self.menu_button_placed() && self.forced_size().is_none()
+    }
+
+    /// True when the game's mouse feed keeps its own point: no layer can hold a game viewport under the cursor and
+    /// no render size is forced.
+    pub fn game_point_idle(&self) -> bool {
+        self.snapshot.load().layers.is_empty() && self.forced_size().is_none()
+    }
+
+    /// Keeps a pointer move that passed without the host lock; a later one replaces it.
+    pub fn set_pending_pointer(&self, x: f32, y: f32) {
+        let packed = (u64::from(x.to_bits()) << Self::WIDTH_SHIFT) | u64::from(y.to_bits());
+        self.pending_pointer.store(packed, Ordering::Relaxed);
+    }
+
+    /// The pointer move kept by `set_pending_pointer` since the last call.
+    pub fn take_pending_pointer(&self) -> Option<(f32, f32)> {
+        let packed = self.pending_pointer.swap(Self::NO_POINT, Ordering::Relaxed);
+        (packed != Self::NO_POINT)
+            .then(|| (f32::from_bits((packed >> Self::WIDTH_SHIFT) as u32), f32::from_bits(packed as u32)))
     }
 
     fn pack(size: RenderSize) -> u64 {
