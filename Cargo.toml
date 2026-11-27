@@ -47,11 +47,11 @@ windows-sys = "0.61.2"
 windows = "0.62.2"
 # The PE reader of the export test of the manager DLL
 object = { version = "0.40.0", default-features = false, features = ["read_core", "pe"] }
-# The UI toolkit, from the amml repository at release tag 26.60.0
-amml-ui = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.6" }
-amml-i18n = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.6" }
-amml-i18n-tool = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.6" }
-amml-ui-rules = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.6" }
+# The UI toolkit, from the amml repository at release tag 26.63.8
+amml-ui = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.8" }
+amml-i18n = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.8" }
+amml-i18n-tool = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.8" }
+amml-ui-rules = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.8" }
 amm-core = { path = "crates/amm-core" }
 amm-abi = { path = "crates/amm-abi" }
 amm-store = { path = "crates/amm-store" }
@@ -59,11 +59,11 @@ amm-ui = { path = "crates/amm-ui" }
 amm-client = { path = "crates/amm-client" }
 amm-ffi = { path = "crates/amm-ffi" }
 amm-overlay = { path = "crates/amm-overlay" }
-# The AMML stable mod API and its ABI types, from the AMML working tree next to this repository
-amml-abi = { path = "../amml/loader/abi" }
-amml-api = { path = "../amml/sdk/api", features = ["d3d"] }
+# The AMML stable mod API and its ABI types, from the amml repository at release tag 26.63.8
+amml-abi = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.8" }
+amml-api = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.8", features = ["d3d"] }
 # The loader runtime, for tests only
-amml-runtime = { path = "../amml/loader/runtime" }
+amml-runtime = { git = "https://github.com/Alaydriem/amml.git", tag = "26.63.8" }
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
